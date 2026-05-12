@@ -1,5 +1,6 @@
+import pydrawcore
 from pydrawcore.controller import DrawCoreController
-from pydrawcore.models import MotionConfig
+from pydrawcore.models import MotionConfig, WorkspaceBounds
 
 
 class FakeTransport:
@@ -32,9 +33,9 @@ def test_move_relative_formats_native_drawcore_command() -> None:
     transport = FakeTransport()
     controller = DrawCoreController(transport)
 
-    controller.move_relative(x_mm=25.4, y_mm=0.0, feed_rate=1200)
+    controller.move_relative(x_mm=25.4, y_mm=12.7, feed_rate=1200)
 
-    assert transport.commands == ["G1G91X25.4Y0.0F1200"]
+    assert transport.commands == ["G1G91X25.4Y-12.7F1200"]
 
 
 def test_pen_up_and_down_emit_drawcore_commands() -> None:
@@ -45,8 +46,56 @@ def test_pen_up_and_down_emit_drawcore_commands() -> None:
     controller.pen_down()
 
     assert transport.commands == [
-        "G1G90 Z60F1200",
-        "G1G90 Z30F600",
+        "G1G90 Z0.5F5000",
+        "G1G90 Z5.0F5000",
+    ]
+
+
+def test_move_pen_uses_explicit_position_and_inferred_feed_rate() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport, motion=MotionConfig())
+
+    controller.move_pen(0.0)
+    controller.move_pen(6.0)
+
+    assert transport.commands == [
+        "G1G90 Z0.0F5000",
+        "G1G90 Z6.0F5000",
+    ]
+
+
+def test_move_pen_relative_uses_signed_delta() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport, motion=MotionConfig())
+
+    controller.move_pen_relative(0.5)
+    controller.move_pen_relative(-0.25)
+
+    assert transport.commands == [
+        "G1G91 Z0.5F5000",
+        "G1G91 Z-0.25F5000",
+    ]
+
+
+def test_dwell_formats_native_pause_command() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport, motion=MotionConfig())
+
+    controller.dwell(150)
+
+    assert transport.commands == ["G4 P0.150"]
+
+
+def test_move_pen_clamps_to_safe_drawcore_range() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport, motion=MotionConfig())
+
+    controller.move_pen(-1.0)
+    controller.move_pen(12.0)
+
+    assert transport.commands == [
+        "G1G90 Z0.0F5000",
+        "G1G90 Z10.0F5000",
     ]
 
 
@@ -58,7 +107,20 @@ def test_get_device_info_reads_queries() -> None:
 
     assert info.port == "COM_TEST"
     assert info.nickname == "writer-01"
+    assert info.inferred_model is None
     assert info.status == "Idle"
+
+
+def test_get_inferred_model_uses_rig_nickname() -> None:
+    transport = FakeTransport()
+    transport.query = lambda command: {
+        "V": "DrawCore V2.22.20260207\n",
+        "$QT": "rig-v3a3-01\n",
+        "?": "Idle\n",
+    }[command]
+    controller = DrawCoreController(transport)
+
+    assert controller.get_inferred_model() == "v3a3"
 
 
 def test_drawcore_home_uses_native_home_command() -> None:
@@ -69,3 +131,11 @@ def test_drawcore_home_uses_native_home_command() -> None:
 
     assert transport.commands == []
     assert transport.home_calls == 1
+
+
+def test_package_exports_workspace_helpers() -> None:
+    bounds = pydrawcore.workspace_bounds_for_model("default")
+
+    assert isinstance(bounds, WorkspaceBounds)
+    assert pydrawcore.WorkspaceBounds is WorkspaceBounds
+    assert pydrawcore.infer_model_from_nickname("rig-v3a3-01") == "v3a3"
