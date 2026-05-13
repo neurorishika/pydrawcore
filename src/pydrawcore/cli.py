@@ -28,7 +28,7 @@ from .paths import (
     default_workspace_profile_path,
     ensure_config_dir,
 )
-from .program import ProgramError, ProgramRunner, TurtleState, export_preview_svg, parse_program, preview_program
+from .program import ProgramError, ProgramRunner, TurtleState, check_program_fits_workspace, export_preview_svg, parse_program, preview_program
 
 
 def _add_port_argument(parser: argparse.ArgumentParser) -> None:
@@ -674,18 +674,26 @@ def _build_calibrated_motion_config(
 ) -> tuple[MotionConfig, WorkspaceBounds]:
     with _controller_from_args(args) as controller:
         seeded_bounds = _seed_workspace_bounds_for_controller(args, controller)
+        midpoint = clamp_pen_position(args.midpoint)
+        step = max(args.step, 0.05)
+
+        # Step 1-2: Move to midpoint so the user can set the correct pen height.
+        print(f"Moving the pen to Z={midpoint} mm for pen-height setup.")
+        controller.move_pen(midpoint)
+        _prompt_ready(
+            f"Position the pen so there is 2–4 mm of clearance above the drawing surface at Z={midpoint} mm, then press Enter to continue or q to quit: "
+        )
+
+        # Step 3: Determine the plot origin.
         origin_offset_x_mm, origin_offset_y_mm = _calibrate_plot_origin_offset(
             controller,
             initial_x_mm=seeded_bounds.origin_offset_x_mm,
             initial_y_mm=seeded_bounds.origin_offset_y_mm,
         )
-        midpoint = clamp_pen_position(args.midpoint)
-        step = max(args.step, 0.05)
-        print("Moving the pen to the safe midpoint for calibration.")
+
+        # Step 4: Pen-down / pen-up calibration.
+        print("Moving the pen to the safe midpoint for Z calibration.")
         controller.move_pen(midpoint)
-        _prompt_ready(
-            "Plotting origin captured. Place the paper or premarked region under the pen with roughly 3-5 mm of clearance, then press Enter to continue or q to quit: "
-        )
         pen_down_position = _probe_pen_down(controller, midpoint=midpoint, step=step)
         pen_up_position = _probe_pen_up(
             controller,
@@ -1171,6 +1179,15 @@ def _cmd_run_program(args: argparse.Namespace) -> int:
         return 0
 
     with _controller_from_args(args) as controller:
+        workspace_bounds = _workspace_from_args(args)
+        if workspace_bounds is not None:
+            check_program_fits_workspace(
+                motion,
+                program_text,
+                workspace_bounds,
+                start_heading_deg=args.start_heading,
+                circle_segment_length_mm=args.circle_segment_length_mm,
+            )
         runner = ProgramRunner(
             controller=controller,
             motion=motion,

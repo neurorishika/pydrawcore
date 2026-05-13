@@ -389,6 +389,45 @@ def parse_program(text: str) -> Program:
     return Program.from_text(text)
 
 
+def check_program_fits_workspace(
+    motion: MotionConfig,
+    text: str,
+    workspace_bounds: WorkspaceBounds,
+    *,
+    start_heading_deg: float = 0.0,
+    circle_segment_length_mm: float = 1.0,
+) -> None:
+    """Run a preview and raise :class:`ProgramError` if any motion falls outside the workspace.
+
+    The plottable area is ``[0, workspace_bounds.width_mm]`` × ``[0, workspace_bounds.height_mm]``.
+    All travel *and* draw moves are checked; exceeding any edge is rejected before hardware moves.
+    """
+    preview = preview_program(
+        motion,
+        text,
+        start_heading_deg=start_heading_deg,
+        circle_segment_length_mm=circle_segment_length_mm,
+    )
+    min_x_mm, max_x_mm, min_y_mm, max_y_mm = preview.bounds()
+    violations: list[str] = []
+    if min_x_mm < 0.0:
+        violations.append(f"left edge at {min_x_mm:.2f} mm (minimum 0.00 mm)")
+    if min_y_mm < 0.0:
+        violations.append(f"bottom edge at {min_y_mm:.2f} mm (minimum 0.00 mm)")
+    if max_x_mm > workspace_bounds.width_mm:
+        violations.append(
+            f"right edge at {max_x_mm:.2f} mm (maximum {workspace_bounds.width_mm:.2f} mm)"
+        )
+    if max_y_mm > workspace_bounds.height_mm:
+        violations.append(
+            f"top edge at {max_y_mm:.2f} mm (maximum {workspace_bounds.height_mm:.2f} mm)"
+        )
+    if violations:
+        raise ProgramError(
+            "Program exceeds plottable workspace: " + "; ".join(violations)
+        )
+
+
 def run_program(
     controller: DrawCoreController,
     motion: MotionConfig,
@@ -396,8 +435,22 @@ def run_program(
     *,
     start_heading_deg: float = 0.0,
     circle_segment_length_mm: float = 1.0,
+    workspace_bounds: WorkspaceBounds | None = None,
 ) -> Program:
-    """Parse and execute a turtle program using the supplied controller."""
+    """Parse and execute a turtle program using the supplied controller.
+
+    If *workspace_bounds* is provided the program is previewed first and a
+    :class:`ProgramError` is raised when any move would fall outside the
+    plottable area, preventing any hardware motion.
+    """
+    if workspace_bounds is not None:
+        check_program_fits_workspace(
+            motion,
+            text,
+            workspace_bounds,
+            start_heading_deg=start_heading_deg,
+            circle_segment_length_mm=circle_segment_length_mm,
+        )
     program = parse_program(text)
     runner = ProgramRunner(
         controller=controller,
