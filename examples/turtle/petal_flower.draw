@@ -1,0 +1,23 @@
+# A more artistic example built from repeated strokes and orbit circles.
+
+MOVE 90 120
+SETWIDTH 0.75
+SETHEADING 0
+
+REPEAT 12
+FORWARD 24
+BACK 24
+RIGHT 30
+END
+
+MOVE 90 120
+SETWIDTH 0.5
+REPEAT 6
+MOVE 110 120
+CIRCLE 12
+MOVE 90 120
+RIGHT 60
+END
+
+MOVE 90 120
+BLOT 1.5

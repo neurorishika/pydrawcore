@@ -1,0 +1,45 @@
+# Tailored to the current saved calibration profile in ~/.drawcore/motion.json.
+# Exact measured width range: 0.3, 0.5, 0.75, 1.25, 2.5 mm
+# Exact measured blot range: 0.1, 0.2, 1.5, 2.2, 3.5 mm
+# Note: the final 3.5 mm blot is the slowest and may dwell for roughly 30 s.
+
+MOVE 15 20
+SETHEADING 0
+
+FORWARD 55 WIDTH 0.3
+MOVE 15 34
+FORWARD 55 WIDTH 0.5
+MOVE 15 48
+FORWARD 55 WIDTH 0.75
+MOVE 15 62
+FORWARD 55 WIDTH 1.25
+MOVE 15 76
+FORWARD 55 WIDTH 2.5
+
+MOVE 95 20
+BLOT 0.1
+MOVE 95 34
+BLOT 0.2
+MOVE 95 52
+BLOT 1.5
+MOVE 95 74
+BLOT 2.2
+MOVE 95 104
+BLOT 3.5
+
+MOVE 135 34
+SETWIDTH 0.5
+CIRCLE 12
+MOVE 155 34
+SETWIDTH 0.75
+CIRCLE 16
+MOVE 145 64
+SETWIDTH 1.25
+CIRCLE 22
+
+MOVE 135 104
+SETWIDTH 0.75
+REPEAT 8
+FORWARD 12
+RIGHT 45
+END

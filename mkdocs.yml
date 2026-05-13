@@ -7,10 +7,10 @@ edit_uri: edit/master/docs/
 
 theme:
   name: material
-  logo: assets/plotter-mark.svg
-  favicon: assets/plotter-mark.svg
+  logo: assets/pydrawcore.svg
+  favicon: assets/pydrawcore.svg
   palette:
-    - scheme: default
+      scheme: default
       primary: teal
       accent: lime
   font:

@@ -1,12 +1,15 @@
 # Uses calibrated line widths and blot sizing.
-# Adjust 0.6/0.7/0.8 if your measured calibration range is tighter.
+# Current saved profile range on this rig is:
+# line widths: 0.3 mm to 2.5 mm
+# blot sizes: 0.1 mm to 3.5 mm
 
 MOVE 20 20
+SETWIDTH 0.75
 SETHEADING 0
 
 FORWARD 40 WIDTH 0.6
 MOVE 20 32
-FORWARD 40 WIDTH 0.7
+FORWARD 40
 MOVE 20 44
 FORWARD 40 WIDTH 0.8
 
@@ -18,4 +21,4 @@ MOVE 80 44
 BLOT 1.0
 
 MOVE 120 32
-CIRCLE 18 WIDTH 0.7
+CIRCLE 18
