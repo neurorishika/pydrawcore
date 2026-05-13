@@ -1,0 +1,44 @@
+:root {
+  --md-primary-fg-color: #0b5d5d;
+  --md-primary-fg-color--light: #1d7874;
+  --md-primary-fg-color--dark: #073b3a;
+  --md-accent-fg-color: #7a8c13;
+  --pdc-surface: linear-gradient(180deg, rgba(11, 93, 93, 0.06), rgba(122, 140, 19, 0.04));
+}
+
+[data-md-color-scheme="default"] {
+  --md-default-bg-color: #f6f3eb;
+  --md-typeset-a-color: #0b5d5d;
+}
+
+.md-header {
+  background: linear-gradient(90deg, #073b3a, #0b5d5d 58%, #1d7874);
+}
+
+.md-tabs {
+  background: rgba(7, 59, 58, 0.92);
+}
+
+.md-main {
+  background:
+    radial-gradient(circle at top right, rgba(122, 140, 19, 0.12), transparent 28%),
+    radial-gradient(circle at top left, rgba(11, 93, 93, 0.08), transparent 34%),
+    #f6f3eb;
+}
+
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > ol > li {
+  background: var(--pdc-surface);
+  border: 1px solid rgba(11, 93, 93, 0.12);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  letter-spacing: 0.01em;
+  font-weight: 700;
+}
+
+.md-typeset code {
+  border-radius: 0.25rem;
+}

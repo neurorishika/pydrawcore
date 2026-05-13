@@ -6,6 +6,7 @@ from pydrawcore.models import MotionConfig, WorkspaceBounds
 class FakeTransport:
     def __init__(self) -> None:
         self.commands: list[str] = []
+        self.command_timeouts: list[float | None] = []
         self.queries: list[str] = []
         self.port_name = "COM_TEST"
         self.home_calls = 0
@@ -13,8 +14,9 @@ class FakeTransport:
     def close(self) -> None:
         return None
 
-    def command(self, command: str) -> None:
+    def command(self, command: str, *, response_timeout: float | None = None) -> None:
         self.commands.append(command)
+        self.command_timeouts.append(response_timeout)
 
     def query(self, command: str) -> str:
         self.queries.append(command)
@@ -36,6 +38,15 @@ def test_move_relative_formats_native_drawcore_command() -> None:
     controller.move_relative(x_mm=25.4, y_mm=12.7, feed_rate=1200)
 
     assert transport.commands == ["G1G91X25.4Y-12.7F1200"]
+
+
+def test_move_relative_avoids_scientific_notation_for_near_zero_values() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport)
+
+    controller.move_relative(x_mm=1.102182119232618e-15, y_mm=18.0, feed_rate=615)
+
+    assert transport.commands == ["G1G91X0.0Y-18.0F615"]
 
 
 def test_pen_up_and_down_emit_drawcore_commands() -> None:
@@ -84,6 +95,17 @@ def test_dwell_formats_native_pause_command() -> None:
     controller.dwell(150)
 
     assert transport.commands == ["G4 P0.150"]
+    assert transport.command_timeouts == [1.0]
+
+
+def test_dwell_extends_timeout_for_longer_blot_holds() -> None:
+    transport = FakeTransport()
+    controller = DrawCoreController(transport, motion=MotionConfig())
+
+    controller.dwell(1800)
+
+    assert transport.commands == ["G4 P1.800"]
+    assert transport.command_timeouts == [2.3]
 
 
 def test_move_pen_clamps_to_safe_drawcore_range() -> None:

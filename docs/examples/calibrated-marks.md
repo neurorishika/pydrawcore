@@ -1,0 +1,34 @@
+# Calibrated Marks
+
+This program is built to exercise line-width and blot-size calibration data.
+
+## Program
+
+```text
+# Uses calibrated line widths and blot sizing.
+# Adjust 0.6/0.7/0.8 if your measured calibration range is tighter.
+
+HOME
+MOVE 20 20
+SETHEADING 0
+
+FORWARD 40 WIDTH 0.6
+MOVE 20 32
+FORWARD 40 WIDTH 0.7
+MOVE 20 44
+FORWARD 40 WIDTH 0.8
+
+MOVE 80 20
+BLOT 0.6
+MOVE 80 32
+BLOT 0.8
+MOVE 80 44
+BLOT 1.0
+
+MOVE 120 32
+CIRCLE 18 WIDTH 0.7
+```
+
+## Why run it
+
+Use this after recalibrating feed rates or dwell times to see whether the interpolation model still matches physical output on the current pen and paper combination.

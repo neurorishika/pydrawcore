@@ -18,7 +18,7 @@ class BaseTransport(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def command(self, command: str) -> None:
+    def command(self, command: str, *, response_timeout: float | None = None) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -65,9 +65,9 @@ class DrawCoreTransport(BaseTransport):
         if getattr(self, "_serial", None) is not None and self._serial.is_open:
             self._serial.close()
 
-    def command(self, command: str) -> None:
+    def command(self, command: str, *, response_timeout: float | None = None) -> None:
         normalized = ensure_cr(command)
-        response = self._round_trip(normalized)
+        response = self._round_trip(normalized, response_timeout=response_timeout)
         parse_ok(response, normalized.rstrip())
 
     def query(self, command: str) -> str:
@@ -88,13 +88,20 @@ class DrawCoreTransport(BaseTransport):
         self._serial.readline()
         self._serial.reset_input_buffer()
 
-    def _round_trip(self, command: str) -> str:
+    def _round_trip(self, command: str, *, response_timeout: float | None = None) -> str:
         self._ensure_open()
+        original_timeout = self._serial.timeout
+        if response_timeout is not None:
+            self._serial.timeout = response_timeout
         try:
             self._serial.write(command.encode("ascii"))
         except serial.SerialException as exc:
             raise ConnectionError(f"Failed while sending {command!r}") from exc
-        return self._readline(expect_non_empty=True)
+        try:
+            return self._readline(expect_non_empty=True)
+        finally:
+            if response_timeout is not None:
+                self._serial.timeout = original_timeout
 
     def _readline(self, expect_non_empty: bool) -> str:
         self._ensure_open()

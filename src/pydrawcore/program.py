@@ -1,3 +1,5 @@
+"""Parser, preview, and execution engine for the turtle-style drawing DSL."""
+
 from __future__ import annotations
 
 import math
@@ -5,11 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .controller import DrawCoreController
-from .models import MotionConfig
+from .models import MotionConfig, WorkspaceBounds
 
 
 @dataclass(slots=True)
 class ProgramError(ValueError):
+    """Raised when parsing or executing a drawing program fails."""
+
     message: str
     line_number: int | None = None
 
@@ -21,6 +25,8 @@ class ProgramError(ValueError):
 
 @dataclass(slots=True)
 class ProgramCommand:
+    """Normalized representation of a parsed DSL command."""
+
     name: str
     values: tuple[object, ...] = ()
     line_number: int = 0
@@ -38,15 +44,19 @@ class ProgramCommand:
 
 @dataclass(slots=True)
 class Program:
+    """Parsed turtle program represented as a top-level command list."""
+
     commands: tuple[ProgramCommand, ...]
 
     @classmethod
     def from_text(cls, text: str) -> "Program":
+        """Parse a program directly from raw text content."""
         root = _parse_lines(text)
         return cls(commands=tuple(root))
 
     @classmethod
     def from_file(cls, path: str | Path) -> "Program":
+        """Read and parse a program file from disk."""
         return cls.from_text(Path(path).read_text(encoding="utf-8"))
 
     def to_dict(self) -> list[dict[str, object]]:
@@ -55,21 +65,159 @@ class Program:
 
 @dataclass(slots=True)
 class TurtleState:
+    """Mutable runner state for current position and heading."""
+
     x_mm: float = 0.0
     y_mm: float = 0.0
     heading_deg: float = 0.0
+    default_line_width_mm: float | None = None
+
+
+@dataclass(slots=True)
+class PreviewOperation:
+    """Single previewable machine action emitted by a turtle program."""
+
+    kind: str
+    start_x_mm: float | None = None
+    start_y_mm: float | None = None
+    end_x_mm: float | None = None
+    end_y_mm: float | None = None
+    feed_rate: int | None = None
+    estimated_width_mm: float | None = None
+    dwell_ms: float | None = None
+    estimated_blot_size_mm: float | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "start_x_mm": self.start_x_mm,
+            "start_y_mm": self.start_y_mm,
+            "end_x_mm": self.end_x_mm,
+            "end_y_mm": self.end_y_mm,
+            "feed_rate": self.feed_rate,
+            "estimated_width_mm": self.estimated_width_mm,
+            "dwell_ms": self.dwell_ms,
+            "estimated_blot_size_mm": self.estimated_blot_size_mm,
+        }
+
+
+@dataclass(slots=True)
+class ProgramPreview:
+    """Previewable representation of the compiled turtle motion plan."""
+
+    operations: tuple[PreviewOperation, ...]
+
+    def bounds(self) -> tuple[float, float, float, float]:
+        x_values = [0.0]
+        y_values = [0.0]
+        for operation in self.operations:
+            for value in (operation.start_x_mm, operation.end_x_mm):
+                if value is not None:
+                    x_values.append(value)
+            for value in (operation.start_y_mm, operation.end_y_mm):
+                if value is not None:
+                    y_values.append(value)
+        return min(x_values), max(x_values), min(y_values), max(y_values)
+
+    def to_dict(self) -> dict[str, object]:
+        min_x_mm, max_x_mm, min_y_mm, max_y_mm = self.bounds()
+        return {
+            "bounds": {
+                "min_x_mm": min_x_mm,
+                "max_x_mm": max_x_mm,
+                "min_y_mm": min_y_mm,
+                "max_y_mm": max_y_mm,
+            },
+            "operations": [operation.to_dict() for operation in self.operations],
+        }
+
+
+@dataclass(slots=True)
+class PreviewController:
+    """Controller-like sink that records travel, draw, and blot operations."""
+
+    motion: MotionConfig
+    x_mm: float = 0.0
+    y_mm: float = 0.0
+    pen_is_down: bool = False
+    operations: list[PreviewOperation] = field(default_factory=list)
+
+    def pen_up(self) -> None:
+        self.pen_is_down = False
+
+    def pen_down(self) -> None:
+        self.pen_is_down = True
+
+    def move_relative(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
+        next_x_mm = self.x_mm + x_mm
+        next_y_mm = self.y_mm + y_mm
+        operation_kind = "draw" if self.pen_is_down else "travel"
+        estimated_width_mm = None
+        if operation_kind == "draw" and feed_rate is not None and self.motion.line_width_calibration is not None:
+            estimated_width_mm = self.motion.line_width_calibration.predict_measured_value(float(feed_rate))
+        self.operations.append(
+            PreviewOperation(
+                kind=operation_kind,
+                start_x_mm=self.x_mm,
+                start_y_mm=self.y_mm,
+                end_x_mm=next_x_mm,
+                end_y_mm=next_y_mm,
+                feed_rate=feed_rate,
+                estimated_width_mm=estimated_width_mm,
+            )
+        )
+        self.x_mm = next_x_mm
+        self.y_mm = next_y_mm
+
+    def dwell(self, milliseconds: int | float) -> None:
+        estimated_blot_size_mm = None
+        if self.motion.blot_delay_calibration is not None:
+            estimated_blot_size_mm = self.motion.blot_delay_calibration.predict_measured_value(float(milliseconds))
+        self.operations.append(
+            PreviewOperation(
+                kind="blot",
+                start_x_mm=self.x_mm,
+                start_y_mm=self.y_mm,
+                end_x_mm=self.x_mm,
+                end_y_mm=self.y_mm,
+                dwell_ms=float(milliseconds),
+                estimated_blot_size_mm=estimated_blot_size_mm,
+            )
+        )
+
+    def home(self) -> None:
+        if self.x_mm != 0.0 or self.y_mm != 0.0:
+            self.operations.append(
+                PreviewOperation(
+                    kind="home",
+                    start_x_mm=self.x_mm,
+                    start_y_mm=self.y_mm,
+                    end_x_mm=0.0,
+                    end_y_mm=0.0,
+                )
+            )
+        self.pen_is_down = False
+        self.x_mm = 0.0
+        self.y_mm = 0.0
 
 
 @dataclass(slots=True)
 class ProgramRunner:
+    """Execute parsed turtle programs against a connected controller."""
+
     controller: DrawCoreController
     motion: MotionConfig
     circle_segment_length_mm: float = 1.0
     state: TurtleState = field(default_factory=TurtleState)
 
     def run(self, program: Program) -> None:
+        """Execute each top-level command in order."""
         for command in program.commands:
             self._execute_command(command)
+
+    def return_to_origin(self) -> None:
+        """Travel back to the program origin with the pen raised."""
+        self._move_to(0.0, 0.0)
 
     def _execute_command(self, command: ProgramCommand) -> None:
         if command.name == "HOME":
@@ -82,6 +230,9 @@ class ProgramRunner:
             return
         if command.name == "PENDOWN":
             self.controller.pen_down()
+            return
+        if command.name == "SETWIDTH":
+            self.state.default_line_width_mm = _coerce_width_setting(command.values[0], command)
             return
         if command.name == "SETHEADING":
             self.state.heading_deg = _normalize_heading(_coerce_float(command.values[0], command))
@@ -133,6 +284,8 @@ class ProgramRunner:
     def _move_to(self, target_x_mm: float, target_y_mm: float) -> None:
         delta_x_mm = target_x_mm - self.state.x_mm
         delta_y_mm = target_y_mm - self.state.y_mm
+        if delta_x_mm == 0.0 and delta_y_mm == 0.0:
+            return
         self.controller.pen_up()
         self.controller.move_relative(x_mm=delta_x_mm, y_mm=delta_y_mm, feed_rate=self.motion.feed_rate_xy)
         self.state.x_mm = target_x_mm
@@ -147,7 +300,12 @@ class ProgramRunner:
     ) -> None:
         delta_x_mm = target_x_mm - self.state.x_mm
         delta_y_mm = target_y_mm - self.state.y_mm
-        self._draw_relative(delta_x_mm=delta_x_mm, delta_y_mm=delta_y_mm, line_width_mm=line_width_mm, command=command)
+        self._draw_relative(
+            delta_x_mm=delta_x_mm,
+            delta_y_mm=delta_y_mm,
+            line_width_mm=self._effective_line_width(line_width_mm),
+            command=command,
+        )
 
     def _draw_heading_distance(
         self,
@@ -158,7 +316,17 @@ class ProgramRunner:
         radians = math.radians(self.state.heading_deg)
         delta_x_mm = math.cos(radians) * distance_mm
         delta_y_mm = math.sin(radians) * distance_mm
-        self._draw_relative(delta_x_mm=delta_x_mm, delta_y_mm=delta_y_mm, line_width_mm=line_width_mm, command=command)
+        self._draw_relative(
+            delta_x_mm=delta_x_mm,
+            delta_y_mm=delta_y_mm,
+            line_width_mm=self._effective_line_width(line_width_mm),
+            command=command,
+        )
+
+    def _effective_line_width(self, line_width_mm: float | None) -> float | None:
+        if line_width_mm is not None:
+            return line_width_mm
+        return self.state.default_line_width_mm
 
     def _draw_relative(
         self,
@@ -193,9 +361,10 @@ class ProgramRunner:
         angle_step = (2.0 * math.pi) / segment_count
         start_x_mm = center_x_mm + radius_mm
         start_y_mm = center_y_mm
+        effective_line_width_mm = self._effective_line_width(line_width_mm)
 
         self._move_to(start_x_mm, start_y_mm)
-        feed_rate = _resolve_line_feed_rate(self.motion, line_width_mm, command)
+        feed_rate = _resolve_line_feed_rate(self.motion, effective_line_width_mm, command)
         self.controller.pen_down()
         current_x_mm = start_x_mm
         current_y_mm = start_y_mm
@@ -216,6 +385,7 @@ class ProgramRunner:
 
 
 def parse_program(text: str) -> Program:
+    """Parse raw turtle DSL text into a :class:`Program`."""
     return Program.from_text(text)
 
 
@@ -227,6 +397,7 @@ def run_program(
     start_heading_deg: float = 0.0,
     circle_segment_length_mm: float = 1.0,
 ) -> Program:
+    """Parse and execute a turtle program using the supplied controller."""
     program = parse_program(text)
     runner = ProgramRunner(
         controller=controller,
@@ -236,6 +407,95 @@ def run_program(
     )
     runner.run(program)
     return program
+
+
+def preview_program(
+    motion: MotionConfig,
+    text: str,
+    *,
+    start_heading_deg: float = 0.0,
+    circle_segment_length_mm: float = 1.0,
+    return_to_origin: bool = False,
+) -> ProgramPreview:
+    """Parse a turtle program and record the resulting motion plan without hardware."""
+    program = parse_program(text)
+    controller = PreviewController(motion=motion)
+    runner = ProgramRunner(
+        controller=controller,
+        motion=motion,
+        circle_segment_length_mm=circle_segment_length_mm,
+        state=TurtleState(heading_deg=_normalize_heading(start_heading_deg)),
+    )
+    controller.pen_up()
+    runner.run(program)
+    if return_to_origin:
+        controller.pen_up()
+        runner.return_to_origin()
+    return ProgramPreview(operations=tuple(controller.operations))
+
+
+def export_preview_svg(
+    preview: ProgramPreview,
+    output_path: str | Path,
+    *,
+    workspace_bounds: WorkspaceBounds | None = None,
+) -> Path:
+    """Render a previewed turtle plan to an SVG file."""
+    margin_mm = 10.0
+    min_x_mm, max_x_mm, min_y_mm, max_y_mm = preview.bounds()
+    if workspace_bounds is not None:
+        min_x_mm = min(min_x_mm, 0.0)
+        min_y_mm = min(min_y_mm, 0.0)
+        max_x_mm = max(max_x_mm, workspace_bounds.width_mm)
+        max_y_mm = max(max_y_mm, workspace_bounds.height_mm)
+
+    canvas_width_mm = (max_x_mm - min_x_mm) + (2 * margin_mm)
+    canvas_height_mm = (max_y_mm - min_y_mm) + (2 * margin_mm)
+
+    def svg_x(x_mm: float) -> float:
+        return (x_mm - min_x_mm) + margin_mm
+
+    def svg_y(y_mm: float) -> float:
+        return (max_y_mm - y_mm) + margin_mm
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_width_mm:.2f}mm" height="{canvas_height_mm:.2f}mm" viewBox="0 0 {canvas_width_mm:.2f} {canvas_height_mm:.2f}">',
+        '<rect width="100%" height="100%" fill="#fffdf7"/>',
+    ]
+
+    if workspace_bounds is not None:
+        lines.append(
+            f'<rect x="{svg_x(0.0):.2f}" y="{svg_y(workspace_bounds.height_mm):.2f}" width="{workspace_bounds.width_mm:.2f}" height="{workspace_bounds.height_mm:.2f}" fill="none" stroke="#d7d0c4" stroke-width="0.35"/>'
+        )
+
+    origin_x = svg_x(0.0)
+    origin_y = svg_y(0.0)
+    lines.extend(
+        [
+            f'<line x1="{origin_x - 2:.2f}" y1="{origin_y:.2f}" x2="{origin_x + 2:.2f}" y2="{origin_y:.2f}" stroke="#b35c37" stroke-width="0.4"/>',
+            f'<line x1="{origin_x:.2f}" y1="{origin_y - 2:.2f}" x2="{origin_x:.2f}" y2="{origin_y + 2:.2f}" stroke="#b35c37" stroke-width="0.4"/>',
+        ]
+    )
+
+    for operation in preview.operations:
+        if operation.kind in {"travel", "draw", "home"} and operation.start_x_mm is not None and operation.end_x_mm is not None:
+            stroke = "#c8c2b8" if operation.kind != "draw" else "#141414"
+            dash = ' stroke-dasharray="2 2"' if operation.kind != "draw" else ""
+            stroke_width = operation.estimated_width_mm if operation.estimated_width_mm is not None else (0.3 if operation.kind == "draw" else 0.2)
+            lines.append(
+                f'<line x1="{svg_x(operation.start_x_mm):.2f}" y1="{svg_y(operation.start_y_mm or 0.0):.2f}" x2="{svg_x(operation.end_x_mm):.2f}" y2="{svg_y(operation.end_y_mm or 0.0):.2f}" stroke="{stroke}" stroke-width="{stroke_width:.2f}" stroke-linecap="round"{dash}/>'
+            )
+        elif operation.kind == "blot" and operation.start_x_mm is not None and operation.start_y_mm is not None:
+            radius_mm = (operation.estimated_blot_size_mm or 0.5) / 2.0
+            lines.append(
+                f'<circle cx="{svg_x(operation.start_x_mm):.2f}" cy="{svg_y(operation.start_y_mm):.2f}" r="{radius_mm:.2f}" fill="#141414"/>'
+            )
+
+    lines.append("</svg>")
+    resolved_path = Path(output_path).expanduser().resolve()
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return resolved_path
 
 
 def _parse_lines(text: str) -> list[ProgramCommand]:
@@ -281,6 +541,10 @@ def _parse_command(command_name: str, arguments: list[str], line_number: int, so
     if command_name in {"HOME", "PENUP", "PENDOWN"}:
         _expect_argument_count(command_name, arguments, 0, line_number)
         return ProgramCommand(name=command_name, line_number=line_number, source=source)
+
+    if command_name == "SETWIDTH":
+        _expect_argument_count(command_name, arguments, 1, line_number)
+        return ProgramCommand(name=command_name, values=(_parse_width_setting(arguments[0]),), line_number=line_number, source=source)
 
     if command_name in {"LEFT", "RIGHT", "SETHEADING", "BLOT"}:
         _expect_argument_count(command_name, arguments, 1, line_number)
@@ -340,6 +604,13 @@ def _parse_width_arguments(command_name: str, arguments: list[str], line_number:
             raise ProgramError("Expected WIDTH keyword before the width value.", line_number=line_number)
         width_mm = float(arguments[2])
     return (float(arguments[0]), width_mm)
+
+
+def _parse_width_setting(argument: str) -> float | None:
+    normalized = argument.strip().upper()
+    if normalized in {"NONE", "OFF", "DEFAULT"}:
+        return None
+    return float(argument)
 
 
 def _expect_argument_count(command_name: str, arguments: list[str], count: int, line_number: int) -> None:
@@ -415,6 +686,15 @@ def _coerce_optional_float(value: object) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _coerce_width_setting(value: object, command: ProgramCommand) -> float | None:
+    if value is None:
+        return None
+    width_mm = _coerce_float(value, command)
+    if width_mm <= 0:
+        raise ProgramError("SETWIDTH requires a width greater than zero.", line_number=command.line_number)
+    return width_mm
 
 
 def _coerce_int(value: object, command: ProgramCommand) -> int:

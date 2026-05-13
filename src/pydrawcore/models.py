@@ -1,3 +1,5 @@
+"""Data models for calibration, workspace bounds, and device metadata."""
+
 from __future__ import annotations
 
 import json
@@ -11,6 +13,7 @@ MM_PER_INCH = 25.4
 
 
 def clamp_pen_position(position: float) -> float:
+    """Clamp a pen position into the safe DrawCore servo range."""
     return max(PEN_POSITION_MIN, min(PEN_POSITION_MAX, float(position)))
 
 
@@ -38,6 +41,8 @@ def _drop_none_values(value: object) -> object:
 
 @dataclass(slots=True, frozen=True)
 class CalibrationSample:
+    """A single measured calibration point."""
+
     parameter_value: float
     measured_value: float
 
@@ -51,6 +56,8 @@ class CalibrationSample:
 
 @dataclass(slots=True)
 class CalibrationModel:
+    """Piecewise interpolation model built from calibration samples."""
+
     samples: list[CalibrationSample] = field(default_factory=list)
     fit_kind: str = "piecewise"
     slope: float | None = None
@@ -114,6 +121,7 @@ class CalibrationModel:
         )
 
     def predict_measured_value(self, parameter_value: float) -> float:
+        """Estimate a measured result for a machine parameter value."""
         if not self.samples:
             raise ValueError("Calibration model has no samples.")
 
@@ -131,6 +139,7 @@ class CalibrationModel:
         return sorted_samples[-1].measured_value
 
     def resolve_parameter_for_measurement(self, measured_value: float) -> float:
+        """Resolve the machine parameter needed for a target measurement."""
         if not self.samples:
             raise ValueError("Calibration model has no samples.")
         clamped_measured = _clamp(
@@ -156,6 +165,8 @@ class CalibrationModel:
 
 @dataclass(slots=True, frozen=True)
 class DiscoveredDevice:
+    """A compatible serial device returned by discovery."""
+
     port: str
     description: str
     hwid: str
@@ -163,6 +174,8 @@ class DiscoveredDevice:
 
 @dataclass(slots=True, frozen=True)
 class DeviceInfo:
+    """Identity and status details queried from a controller."""
+
     port: str | None
     firmware: str
     nickname: str | None = None
@@ -172,9 +185,13 @@ class DeviceInfo:
 
 @dataclass(slots=True, frozen=True)
 class WorkspaceBounds:
+    """Writable plot-space bounds and origin offset for a rig."""
+
     model: str
     width_mm: float
     height_mm: float
+    origin_offset_x_mm: float = 0.0
+    origin_offset_y_mm: float = 0.0
 
     @classmethod
     def from_file(cls, path: str | Path) -> "WorkspaceBounds":
@@ -217,10 +234,12 @@ DRAWCORE_WORKSPACE_PRESETS: dict[str, WorkspaceBounds] = {
 
 
 def workspace_bounds_for_model(model: str) -> WorkspaceBounds:
+    """Return the built-in workspace preset for a known model key."""
     return DRAWCORE_WORKSPACE_PRESETS[model.lower()]
 
 
 def infer_model_from_nickname(nickname: str | None) -> str | None:
+    """Infer a known model identifier from a device nickname."""
     if not nickname:
         return None
 
@@ -236,6 +255,12 @@ def infer_model_from_nickname(nickname: str | None) -> str | None:
 
 @dataclass(slots=True)
 class MotionConfig:
+    """Motion profile used by the controller and CLI.
+
+    Stores default feed rates, pen positions, and optional interpolation models
+    that translate desired line widths and blot sizes into machine parameters.
+    """
+
     feed_rate_xy: int = 1200
     feed_rate_pen_up: int = 5000
     feed_rate_pen_down: int = 5000
@@ -262,15 +287,18 @@ class MotionConfig:
         return cls(**data)
 
     def to_file(self, path: str | Path) -> None:
+        """Serialize the motion profile to JSON."""
         serialized = _drop_none_values(asdict(self))
         Path(path).write_text(json.dumps(serialized, indent=2) + "\n", encoding="utf-8")
 
     def feed_rate_for_line_width(self, line_width_mm: float) -> int | None:
+        """Resolve a calibrated XY feed rate for a requested line width."""
         if self.line_width_calibration is None:
             return None
         return round(self.line_width_calibration.resolve_parameter_for_measurement(line_width_mm))
 
     def blot_delay_for_size(self, blot_size_mm: float) -> int | None:
+        """Resolve a calibrated dwell delay for a requested blot size."""
         if self.blot_delay_calibration is None:
             return None
         return round(self.blot_delay_calibration.resolve_parameter_for_measurement(blot_size_mm))

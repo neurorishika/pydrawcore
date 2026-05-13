@@ -1,5 +1,5 @@
 from pydrawcore.models import CalibrationModel, CalibrationSample, MotionConfig
-from pydrawcore.program import ProgramError, parse_program, run_program
+from pydrawcore.program import ProgramError, ProgramRunner, TurtleState, export_preview_svg, parse_program, preview_program, run_program
 
 
 class FakeProgramController:
@@ -48,6 +48,14 @@ def test_parse_program_supports_repeat_blocks() -> None:
     assert [child.name for child in program.commands[0].children] == ["FORWARD", "RIGHT"]
 
 
+def test_parse_program_supports_setwidth() -> None:
+    program = parse_program("SETWIDTH 0.7\nFORWARD 10\nSETWIDTH NONE\nBACK 5\n")
+
+    assert [command.name for command in program.commands] == ["SETWIDTH", "FORWARD", "SETWIDTH", "BACK"]
+    assert program.commands[0].values == (0.7,)
+    assert program.commands[2].values == (None,)
+
+
 def test_run_program_uses_calibrated_width_and_blot_dwell() -> None:
     controller = FakeProgramController()
 
@@ -69,6 +77,28 @@ def test_run_program_uses_calibrated_width_and_blot_dwell() -> None:
     ]
 
 
+def test_run_program_uses_setwidth_as_default_draw_width() -> None:
+    controller = FakeProgramController()
+
+    run_program(
+        controller,
+        _motion_with_calibration(),
+        "SETWIDTH 0.7\nFORWARD 20\nLINE 40 0\nSETWIDTH NONE\nBACK 10\n",
+    )
+
+    assert controller.calls == [
+        ("pen_down", None, None, None),
+        ("move_relative", 20.0, 0.0, 600),
+        ("pen_up", None, None, None),
+        ("pen_down", None, None, None),
+        ("move_relative", 20.0, 0.0, 600),
+        ("pen_up", None, None, None),
+        ("pen_down", None, None, None),
+        ("move_relative", -10.0, -0.0, 1200),
+        ("pen_up", None, None, None),
+    ]
+
+
 def test_run_program_rejects_out_of_range_width() -> None:
     controller = FakeProgramController()
 
@@ -81,3 +111,50 @@ def test_run_program_rejects_out_of_range_width() -> None:
 
     assert "Line 1" in message
     assert "calibrated maximum" in message
+
+
+def test_runner_returns_to_plotting_origin_with_pen_up() -> None:
+    controller = FakeProgramController()
+    runner = ProgramRunner(
+        controller=controller,
+        motion=_motion_with_calibration(),
+        state=TurtleState(),
+    )
+
+    runner.run(parse_program("MOVE 10 5\nFORWARD 20 WIDTH 0.7\n"))
+    runner.return_to_origin()
+
+    assert controller.calls == [
+        ("pen_up", None, None, None),
+        ("move_relative", 10.0, 5.0, 1200),
+        ("pen_down", None, None, None),
+        ("move_relative", 20.0, 0.0, 600),
+        ("pen_up", None, None, None),
+        ("pen_up", None, None, None),
+        ("move_relative", -30.0, -5.0, 1200),
+    ]
+
+
+def test_preview_program_records_operations_and_estimated_widths() -> None:
+    preview = preview_program(
+        _motion_with_calibration(),
+        "SETWIDTH 0.7\nMOVE 10 5\nFORWARD 20\nBLOT 0.8\n",
+        return_to_origin=True,
+    )
+
+    operations = preview.to_dict()["operations"]
+    assert [operation["kind"] for operation in operations] == ["travel", "draw", "blot", "travel"]
+    assert operations[1]["estimated_width_mm"] == 0.7
+    assert operations[2]["estimated_blot_size_mm"] == 0.8
+
+
+def test_export_preview_svg_writes_svg_file(tmp_path) -> None:
+    preview = preview_program(_motion_with_calibration(), "SETWIDTH 0.7\nFORWARD 20\n", return_to_origin=True)
+    output_path = tmp_path / "preview.svg"
+
+    resolved_path = export_preview_svg(preview, output_path)
+
+    assert resolved_path == output_path.resolve()
+    svg_text = output_path.read_text(encoding="utf-8")
+    assert "<svg" in svg_text
+    assert "<line" in svg_text

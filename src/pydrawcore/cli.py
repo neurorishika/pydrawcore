@@ -28,7 +28,7 @@ from .paths import (
     default_workspace_profile_path,
     ensure_config_dir,
 )
-from .program import ProgramError, parse_program, run_program
+from .program import ProgramError, ProgramRunner, TurtleState, export_preview_svg, parse_program, preview_program
 
 
 def _add_port_argument(parser: argparse.ArgumentParser) -> None:
@@ -94,7 +94,10 @@ def _save_motion_profile(args: argparse.Namespace, motion: MotionConfig) -> Path
 def _workspace_from_args(args: argparse.Namespace) -> WorkspaceBounds | None:
     workspace_config_path = getattr(args, "workspace_config", None)
     if workspace_config_path:
-        return WorkspaceBounds.from_file(workspace_config_path)
+        workspace_path = Path(workspace_config_path).expanduser().resolve()
+        if workspace_path.exists():
+            return WorkspaceBounds.from_file(workspace_path)
+        return None
 
     default_profile = _default_workspace_profile_path(args)
     if default_profile.exists() and not getattr(args, "use_model_preset", False):
@@ -102,10 +105,18 @@ def _workspace_from_args(args: argparse.Namespace) -> WorkspaceBounds | None:
     return None
 
 
-def _save_workspace_profile(args: argparse.Namespace, bounds: WorkspaceBounds) -> Path:
+def _save_workspace_profile(
+    args: argparse.Namespace,
+    bounds: WorkspaceBounds,
+    *,
+    use_output_path: bool = True,
+) -> Path:
     output = getattr(args, "output", None)
-    if output:
+    if use_output_path and output:
         output_path = Path(output).expanduser().resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+    elif getattr(args, "workspace_config", None):
+        output_path = Path(args.workspace_config).expanduser().resolve()
         output_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         ensure_config_dir(getattr(args, "config_dir", None))
@@ -160,7 +171,53 @@ def _resolve_workspace_bounds(args: argparse.Namespace) -> WorkspaceBounds:
     bounds = workspace_bounds_for_model(selected_model)
     width_mm = args.width_mm if args.width_mm is not None else bounds.width_mm
     height_mm = args.height_mm if args.height_mm is not None else bounds.height_mm
-    return WorkspaceBounds(model=bounds.model, width_mm=width_mm, height_mm=height_mm)
+    return WorkspaceBounds(
+        model=bounds.model,
+        width_mm=width_mm,
+        height_mm=height_mm,
+        origin_offset_x_mm=(saved_bounds.origin_offset_x_mm if saved_bounds is not None else bounds.origin_offset_x_mm),
+        origin_offset_y_mm=(saved_bounds.origin_offset_y_mm if saved_bounds is not None else bounds.origin_offset_y_mm),
+    )
+
+
+def _require_workspace_profile(args: argparse.Namespace) -> WorkspaceBounds:
+    bounds = _workspace_from_args(args)
+    if bounds is None:
+        raise ValueError(
+            "A saved workspace profile with the plotting-origin offset is required. Run calibrate-pen first."
+        )
+    return bounds
+
+
+def _move_to_plot_origin(controller: DrawCoreController, bounds: WorkspaceBounds) -> None:
+    if bounds.origin_offset_x_mm == 0.0 and bounds.origin_offset_y_mm == 0.0:
+        return
+    controller.move_relative(x_mm=bounds.origin_offset_x_mm, y_mm=bounds.origin_offset_y_mm)
+
+
+def _seed_workspace_bounds_for_controller(
+    args: argparse.Namespace,
+    controller: DrawCoreController,
+) -> WorkspaceBounds:
+    saved_bounds = _workspace_from_args(args)
+    if saved_bounds is not None:
+        return saved_bounds
+
+    explicit_model = getattr(args, "model", None)
+    if explicit_model is not None:
+        return workspace_bounds_for_model(explicit_model)
+
+    device = _find_connected_device(getattr(controller, "port_name", None))
+    remembered_model = _remembered_model_for_device(args, device)
+    if remembered_model is not None:
+        return workspace_bounds_for_model(remembered_model)
+
+    get_inferred_model = getattr(controller, "get_inferred_model", None)
+    inferred_model = get_inferred_model() if callable(get_inferred_model) else None
+    if inferred_model is not None:
+        return workspace_bounds_for_model(inferred_model)
+
+    return workspace_bounds_for_model("default")
 
 
 def _select_workspace_model(args: argparse.Namespace) -> str:
@@ -184,14 +241,14 @@ def _mark_workspace_bounds(args: argparse.Namespace, bounds: WorkspaceBounds) ->
     drawable_height_mm = bounds.height_mm - (2 * inset_mm)
     if drawable_width_mm <= 0 or drawable_height_mm <= 0:
         raise ValueError("Inset is larger than the selected workspace bounds.")
-    if not args.skip_home:
-        raise ValueError(
-            "mark-bounds cannot start from raw home. The DrawCore extension computes bounds in its plotting frame, not directly from $H. "
-            "Home the machine separately, establish a known plotting origin with small pen-up jogs, then rerun mark-bounds with --skip-home."
-        )
 
     with _controller_from_args(args) as controller:
+        if not args.skip_home:
+            plot_origin = _require_workspace_profile(args)
+            controller.home()
         controller.pen_up()
+        if not args.skip_home:
+            _move_to_plot_origin(controller, plot_origin)
         if inset_mm:
             controller.move_relative(x_mm=inset_mm, y_mm=inset_mm)
         controller.pen_down()
@@ -274,14 +331,17 @@ def _parse_axis_calibration_delta(response: str, step_mm: float) -> float:
 
 def _build_calibrated_workspace_bounds(args: argparse.Namespace) -> WorkspaceBounds:
     preset_bounds = workspace_bounds_for_model(args.model)
+    plot_origin_bounds = _require_workspace_profile(args)
     max_x_mm = args.max_x_mm if args.max_x_mm is not None else preset_bounds.width_mm
     max_y_mm = args.max_y_mm if args.max_y_mm is not None else preset_bounds.height_mm
     step_mm = max(args.step_mm, 1.0)
 
     with _controller_from_args(args) as controller:
         controller.home()
+        controller.pen_up()
+        _move_to_plot_origin(controller, plot_origin_bounds)
         _prompt_ready(
-            "Homing complete. Establish a known plotting origin before XY calibration, then press Enter to start X calibration or q to quit: "
+            "Homing complete. Verify the pen is over the saved plotting origin, then press Enter to start X calibration or q to quit: "
         )
         measured_x_mm = _measure_axis_extent(
             controller,
@@ -290,7 +350,7 @@ def _build_calibrated_workspace_bounds(args: argparse.Namespace) -> WorkspaceBou
             step_mm=step_mm,
         )
         _prompt_ready(
-            "Return the rig to the same plotting origin before Y calibration, then press Enter to continue or q to quit: "
+            "Return the rig to the saved plotting origin before Y calibration, then press Enter to continue or q to quit: "
         )
         measured_y_mm = _measure_axis_extent(
             controller,
@@ -299,7 +359,13 @@ def _build_calibrated_workspace_bounds(args: argparse.Namespace) -> WorkspaceBou
             step_mm=step_mm,
         )
 
-    return WorkspaceBounds(model=args.model, width_mm=measured_x_mm, height_mm=measured_y_mm)
+    return WorkspaceBounds(
+        model=args.model,
+        width_mm=measured_x_mm,
+        height_mm=measured_y_mm,
+        origin_offset_x_mm=plot_origin_bounds.origin_offset_x_mm,
+        origin_offset_y_mm=plot_origin_bounds.origin_offset_y_mm,
+    )
 
 
 def _controller_from_args(args: argparse.Namespace) -> DrawCoreController:
@@ -425,14 +491,16 @@ def _build_line_width_calibration(args: argparse.Namespace, motion: MotionConfig
     min_feed_rate, max_feed_rate = _resolve_line_width_range(args, motion)
     feed_rates = _build_sample_values(min_feed_rate, max_feed_rate, args.samples)
     samples: list[CalibrationSample] = []
+    plot_origin_bounds = _require_workspace_profile(args)
     current_x_mm = args.offset_x_mm
     current_y_mm = args.offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
         controller.pen_up()
+        _move_to_plot_origin(controller, plot_origin_bounds)
         _prompt_ready(
-            "Homing complete. Establish a known plotting origin, place clean paper under the pen, then press Enter to start line-width calibration or q to quit: "
+            "Homing complete. Verify the pen is over the saved plotting origin, place clean paper under the pen, then press Enter to start line-width calibration or q to quit: "
         )
         controller.move_relative(x_mm=current_x_mm, y_mm=current_y_mm)
         print(
@@ -463,14 +531,16 @@ def _build_blot_delay_calibration(args: argparse.Namespace) -> CalibrationModel:
     min_dwell_ms, max_dwell_ms = _resolve_blot_delay_range(args)
     dwell_values_ms = _build_sample_values(min_dwell_ms, max_dwell_ms, args.samples)
     samples: list[CalibrationSample] = []
+    plot_origin_bounds = _require_workspace_profile(args)
     current_x_mm = args.offset_x_mm
     current_y_mm = args.offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
         controller.pen_up()
+        _move_to_plot_origin(controller, plot_origin_bounds)
         _prompt_ready(
-            "Homing complete. Establish a known plotting origin, place clean paper under the pen, then press Enter to start blot-size calibration or q to quit: "
+            "Homing complete. Verify the pen is over the saved plotting origin, place clean paper under the pen, then press Enter to start blot-size calibration or q to quit: "
         )
         controller.move_relative(x_mm=current_x_mm, y_mm=current_y_mm)
         print(
@@ -557,15 +627,64 @@ def _probe_pen_up(
     return pen_down_position
 
 
-def _build_calibrated_motion_config(args: argparse.Namespace, motion: MotionConfig) -> MotionConfig:
+def _prompt_xy_offset(message: str, *, default_x: float = 0.0, default_y: float = 0.0) -> tuple[float, float]:
+    x_mm = _prompt_float_with_default(f"{message} X offset in mm", default=default_x)
+    y_mm = _prompt_float_with_default(f"{message} Y offset in mm", default=default_y)
+    return x_mm, y_mm
+
+
+def _calibrate_plot_origin_offset(
+    controller: DrawCoreController,
+    *,
+    initial_x_mm: float,
+    initial_y_mm: float,
+) -> tuple[float, float]:
+    candidate_x_mm = initial_x_mm
+    candidate_y_mm = initial_y_mm
+
+    print(
+        "Plot-origin calibration: place the pen tip over the desired writing origin, then the machine will home and return to that point using the X/Y offset you provide."
+    )
+    _prompt_ready(
+        "Place the pen tip over the desired plotting origin, then press Enter to home the machine or q to quit: "
+    )
+
+    while True:
+        controller.home()
+        controller.pen_up()
+        candidate_x_mm, candidate_y_mm = _prompt_xy_offset(
+            "Distance from machine home to the plotting origin",
+            default_x=candidate_x_mm,
+            default_y=candidate_y_mm,
+        )
+        controller.move_relative(x_mm=candidate_x_mm, y_mm=candidate_y_mm)
+        response = input(
+            f"Accept plotting-origin offset X={candidate_x_mm:g} mm, Y={candidate_y_mm:g} mm? [y/r/q] "
+        ).strip().lower()
+        if response == "y":
+            return candidate_x_mm, candidate_y_mm
+        if response == "q":
+            raise KeyboardInterrupt("Calibration cancelled by user.")
+        controller.move_relative(x_mm=-candidate_x_mm, y_mm=-candidate_y_mm)
+
+
+def _build_calibrated_motion_config(
+    args: argparse.Namespace,
+    motion: MotionConfig,
+) -> tuple[MotionConfig, WorkspaceBounds]:
     with _controller_from_args(args) as controller:
+        seeded_bounds = _seed_workspace_bounds_for_controller(args, controller)
+        origin_offset_x_mm, origin_offset_y_mm = _calibrate_plot_origin_offset(
+            controller,
+            initial_x_mm=seeded_bounds.origin_offset_x_mm,
+            initial_y_mm=seeded_bounds.origin_offset_y_mm,
+        )
         midpoint = clamp_pen_position(args.midpoint)
         step = max(args.step, 0.05)
-        controller.home()
         print("Moving the pen to the safe midpoint for calibration.")
         controller.move_pen(midpoint)
         _prompt_ready(
-            "Homing complete. Place the pen tip over the premarked region with roughly 3-5 mm of clearance, then press Enter to continue or q to quit: "
+            "Plotting origin captured. Place the paper or premarked region under the pen with roughly 3-5 mm of clearance, then press Enter to continue or q to quit: "
         )
         pen_down_position = _probe_pen_down(controller, midpoint=midpoint, step=step)
         pen_up_position = _probe_pen_up(
@@ -575,12 +694,21 @@ def _build_calibrated_motion_config(args: argparse.Namespace, motion: MotionConf
             step=step,
         )
 
-    return MotionConfig(
-        feed_rate_xy=motion.feed_rate_xy,
-        feed_rate_pen_up=motion.feed_rate_pen_up,
-        feed_rate_pen_down=motion.feed_rate_pen_down,
-        pen_up_position=pen_up_position,
-        pen_down_position=pen_down_position,
+    return (
+        MotionConfig(
+            feed_rate_xy=motion.feed_rate_xy,
+            feed_rate_pen_up=motion.feed_rate_pen_up,
+            feed_rate_pen_down=motion.feed_rate_pen_down,
+            pen_up_position=pen_up_position,
+            pen_down_position=pen_down_position,
+        ),
+        WorkspaceBounds(
+            model=seeded_bounds.model,
+            width_mm=seeded_bounds.width_mm,
+            height_mm=seeded_bounds.height_mm,
+            origin_offset_x_mm=origin_offset_x_mm,
+            origin_offset_y_mm=origin_offset_y_mm,
+        ),
     )
 
 
@@ -713,7 +841,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_port_argument(calibrate_pen)
     _add_motion_config_argument(calibrate_pen)
+    _add_workspace_config_argument(calibrate_pen)
     _add_config_dir_argument(calibrate_pen)
+    calibrate_pen.add_argument(
+        "--model",
+        choices=sorted(DRAWCORE_WORKSPACE_PRESETS.keys()),
+        default=None,
+        help="Model preset used when seeding a new workspace profile for plotting-origin calibration",
+    )
     calibrate_pen.add_argument(
         "--midpoint",
         type=float,
@@ -738,6 +873,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_port_argument(calibrate_line_width)
     _add_motion_config_argument(calibrate_line_width)
+    _add_workspace_config_argument(calibrate_line_width)
     _add_config_dir_argument(calibrate_line_width)
     calibrate_line_width.add_argument("--samples", type=int, default=5, help="Number of feed-rate samples to draw")
     calibrate_line_width.add_argument(
@@ -788,6 +924,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_port_argument(calibrate_blot_size)
     _add_motion_config_argument(calibrate_blot_size)
+    _add_workspace_config_argument(calibrate_blot_size)
     _add_config_dir_argument(calibrate_blot_size)
     calibrate_blot_size.add_argument("--samples", type=int, default=5, help="Number of dwell samples to create")
     calibrate_blot_size.add_argument(
@@ -832,12 +969,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_port_argument(run_program_parser)
     _add_motion_config_argument(run_program_parser)
+    _add_workspace_config_argument(run_program_parser)
     _add_config_dir_argument(run_program_parser)
     run_program_parser.add_argument("program", help="Path to the program text file")
     run_program_parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Parse the program and print the normalized command structure without moving hardware",
+    )
+    run_program_parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Compile the program to motion operations JSON without moving hardware",
+    )
+    run_program_parser.add_argument(
+        "--export-svg",
+        help="Write an SVG preview of the compiled path instead of moving hardware",
     )
     run_program_parser.add_argument(
         "--start-heading",
@@ -926,6 +1073,8 @@ def _cmd_mark_bounds(args: argparse.Namespace) -> int:
                 "model": bounds.model,
                 "width_mm": bounds.width_mm,
                 "height_mm": bounds.height_mm,
+                "origin_offset_x_mm": bounds.origin_offset_x_mm,
+                "origin_offset_y_mm": bounds.origin_offset_y_mm,
                 "inset_mm": max(args.inset_mm, 0.0),
                 "home_first": not args.skip_home,
             },
@@ -955,10 +1104,12 @@ def _cmd_raw_command(args: argparse.Namespace) -> int:
 
 def _cmd_calibrate_pen(args: argparse.Namespace) -> int:
     motion = _motion_from_args(args) or MotionConfig()
-    calibrated_motion = _build_calibrated_motion_config(args, motion)
+    calibrated_motion, calibrated_workspace = _build_calibrated_motion_config(args, motion)
     print(json.dumps(asdict(calibrated_motion), indent=2))
     output_path = _save_motion_profile(args, calibrated_motion)
+    workspace_path = _save_workspace_profile(args, calibrated_workspace, use_output_path=False)
     print(f"Saved motion profile to {output_path}")
+    print(f"Saved workspace profile to {workspace_path}")
     return 0
 
 
@@ -994,19 +1145,44 @@ def _cmd_run_program(args: argparse.Namespace) -> int:
     program_path = Path(args.program).expanduser().resolve()
     program_text = program_path.read_text(encoding="utf-8")
     program = parse_program(program_text)
+    motion = _motion_from_args(args) or MotionConfig()
     if args.dry_run:
         print(json.dumps(program.to_dict(), indent=2))
         return 0
 
-    motion = _motion_from_args(args) or MotionConfig()
-    with _controller_from_args(args) as controller:
-        run_program(
-            controller,
+    if args.preview or args.export_svg:
+        preview = preview_program(
             motion,
             program_text,
             start_heading_deg=args.start_heading,
             circle_segment_length_mm=args.circle_segment_length_mm,
+            return_to_origin=True,
         )
+        result: dict[str, object] = {
+            "program": str(program_path),
+            "commands": len(program.commands),
+            "preview": preview.to_dict(),
+        }
+        if args.export_svg:
+            workspace_bounds = _workspace_from_args(args)
+            svg_path = export_preview_svg(preview, args.export_svg, workspace_bounds=workspace_bounds)
+            result["svg_path"] = str(svg_path)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    with _controller_from_args(args) as controller:
+        runner = ProgramRunner(
+            controller=controller,
+            motion=motion,
+            circle_segment_length_mm=args.circle_segment_length_mm,
+            state=TurtleState(heading_deg=args.start_heading % 360.0),
+        )
+        controller.pen_up()
+        try:
+            runner.run(program)
+        finally:
+            controller.pen_up()
+            runner.return_to_origin()
     print(json.dumps({"program": str(program_path), "commands": len(program.commands)}, indent=2))
     return 0
 

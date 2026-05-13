@@ -29,6 +29,23 @@ Regular install:
 pip install .
 ```
 
+## Documentation
+
+The repository now includes a Material for MkDocs documentation site with getting-started guides, CLI workflows, turtle DSL coverage, examples, and generated API reference.
+
+Build it locally with:
+
+```bash
+pip install -e .[docs]
+mkdocs serve
+```
+
+Create a static site with:
+
+```bash
+mkdocs build
+```
+
 ## CLI usage
 
 List compatible devices:
@@ -81,10 +98,11 @@ pydrawcore calibrate-blot-size --port COM4 --samples 5 --min-dwell-ms 100 --max-
 ```
 
 Pen Z values are clamped to the same safe `0.0..10.0` range used by the Inkscape extension.
-`calibrate-pen` stages at a safe midpoint, probes pen-down by touching and returning to midpoint until a dot is visible, then raises progressively until pen-up clearance is acceptable.
-`calibrate-pen`, `calibrate-xy`, `calibrate-line-width`, and `calibrate-blot-size` all home the machine before starting their interactive flow. For line-width and blot-size calibration, re-establish the plotting origin after homing, then offset into a clean sample area before drawing calibration marks. If you omit the min and max flags, the commands prompt for them at runtime so you can choose the practical range for the current pen and paper. Sample points are distributed logarithmically across the chosen range, and saved calibration uses piecewise linear interpolation over the recorded samples.
+`calibrate-pen` now does two things in one pass: it captures the plotting-origin offset from raw machine home, and then it stages at a safe midpoint, probes pen-down by touching and returning to midpoint until a dot is visible, then raises progressively until pen-up clearance is acceptable.
+The plotting-origin offset is saved in `~/.drawcore/workspace.json` and defines the writable origin as `home + offset`. `mark-bounds`, `calibrate-xy`, `calibrate-line-width`, and `calibrate-blot-size` all home the machine and then move to that saved plotting origin before drawing. Use `--skip-home` on `mark-bounds` only when the machine is already positioned at the plotting origin.
+If you omit the min and max flags, the line-width and blot-size commands prompt for them at runtime so you can choose the practical range for the current pen and paper. Sample points are distributed logarithmically across the chosen range, and saved calibration uses piecewise linear interpolation over the recorded samples.
 By default, motion profiles are saved to and loaded from `~/.drawcore/motion.json`. Use `--config-dir` to change that machine-local directory or `--motion-config` to point at a specific JSON file.
-Measured workspace profiles are saved to and loaded from `~/.drawcore/workspace.json` by default. `mark-bounds` uses the saved workspace profile unless you pass `--use-model-preset`.
+Measured workspace profiles and plotting-origin offsets are saved to and loaded from `~/.drawcore/workspace.json` by default. Run `calibrate-pen` before other plot-space calibration commands so the saved plotting origin is available.
 If the rig does not report a nickname, you can persist a model per device in `~/.drawcore/devices.json` with `remember-model`.
 Workspace bounds in `pydrawcore` are plot-space bounds, matching the extension-facing plotting frame rather than raw DrawCore machine-axis coordinates.
 

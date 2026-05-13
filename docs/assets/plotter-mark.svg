@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="PyDrawCore logo">
+  <rect width="128" height="128" rx="24" fill="#073b3a"/>
+  <path d="M28 90h72" stroke="#f6f3eb" stroke-width="8" stroke-linecap="round"/>
+  <path d="M40 38h48" stroke="#f6f3eb" stroke-width="8" stroke-linecap="round"/>
+  <path d="M48 38v28" stroke="#9bb221" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="48" cy="75" r="8" fill="#9bb221"/>
+  <path d="M88 30v54" stroke="#1d7874" stroke-width="12" stroke-linecap="round"/>
+  <path d="M80 84h16" stroke="#1d7874" stroke-width="10" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,99 @@
+site_name: PyDrawCore
+site_description: Professional documentation for the standalone DrawCore Python controller.
+site_url: https://neurorishika.github.io/pydrawcore/
+repo_url: https://github.com/neurorishika/pydrawcore
+repo_name: neurorishika/pydrawcore
+edit_uri: edit/master/docs/
+
+theme:
+  name: material
+  logo: assets/plotter-mark.svg
+  favicon: assets/plotter-mark.svg
+  palette:
+    - scheme: default
+      primary: teal
+      accent: lime
+  font:
+    text: Source Sans 3
+    code: JetBrains Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.highlight
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Guides:
+      - CLI Workflows: guides/cli.md
+      - Turtle DSL: guides/turtle-dsl.md
+  - Examples:
+      - Overview: examples/index.md
+      - Feature Smoke: examples/feature-smoke.md
+      - Calibrated Marks: examples/calibrated-marks.md
+      - Repeat Rosette: examples/repeat-rosette.md
+  - API Reference:
+      - Overview: api/index.md
+      - Package Exports: api/package.md
+      - Controller: api/controller.md
+      - Models: api/models.md
+      - Program DSL: api/program.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            docstring_style: google
+            heading_level: 2
+            inherited_members: true
+            merge_init_into_class: true
+            separate_signature: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_signature_annotations: true
+            show_source: false
+            summary:
+              attributes: true
+              functions: true
+              modules: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/neurorishika/pydrawcore
+
+extra_css:
+  - stylesheets/extra.css
+
+copyright: Copyright 2026 Trailobot

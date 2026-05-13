@@ -1,3 +1,5 @@
+"""Serial-port discovery helpers for DrawCore-compatible devices."""
+
 from __future__ import annotations
 
 from serial.tools.list_ports import comports
@@ -9,6 +11,7 @@ DRAWCORE_VID_PIDS = ("USB VID:PID=1A86:7523", "USB VID:PID=1A86:8040")
 
 
 def discover_devices() -> list[DiscoveredDevice]:
+    """Return compatible serial devices detected on the local machine."""
     devices: list[DiscoveredDevice] = []
     for port in comports():
         hwid = getattr(port, "hwid", "") or ""
