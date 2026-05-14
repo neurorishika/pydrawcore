@@ -192,7 +192,7 @@ def _require_workspace_profile(args: argparse.Namespace) -> WorkspaceBounds:
 def _move_to_plot_origin(controller: DrawCoreController, bounds: WorkspaceBounds) -> None:
     if bounds.origin_offset_x_mm == 0.0 and bounds.origin_offset_y_mm == 0.0:
         return
-    controller.move_relative(x_mm=bounds.origin_offset_x_mm, y_mm=bounds.origin_offset_y_mm)
+    controller.move_absolute(x_mm=bounds.origin_offset_x_mm, y_mm=bounds.origin_offset_y_mm)
 
 
 def _seed_workspace_bounds_for_controller(
@@ -265,6 +265,7 @@ def _measure_axis_extent(
     axis: str,
     max_extent_mm: float,
     step_mm: float,
+    plot_origin_bounds: WorkspaceBounds,
 ) -> float:
     traveled_mm = 0.0
     controller.pen_up()
@@ -272,20 +273,28 @@ def _measure_axis_extent(
     print(
         f"{axis.upper()} calibration: press Enter to move +{step_mm:g} mm, type h for +{step_mm / 2:g} mm, "
         f"b for -{step_mm:g} mm, bh for -{step_mm / 2:g} mm, enter a signed mm delta for a custom move, "
-        "type y when you want to stop and measure, or q to quit. Each stop marks a point with pen-down, then raises before moving again."
+        "type y when you want to stop and measure, or q to quit. Each stop marks a point with pen-down, then raises before moving again." \
+        "Press r to reset back to the origin if you want to start over."
     )
 
     while True:
-        response = input(f"{axis.upper()} distance {traveled_mm:.2f} mm [Enter/h/b/bh/mm/y/q] ").strip().lower()
+        print(f"Enter for +{step_mm:g} mm, h for +{step_mm / 2:g} mm, b for -{step_mm:g} mm, bh for -{step_mm / 2:g} mm, or a signed mm delta.")
+        response = input(f"{axis.upper()} distance {traveled_mm:.2f} mm. Accept? (y)es/(r)eset/(q)uit or other input: ").strip().lower()
         if response == "y":
             break
         if response == "q":
             raise KeyboardInterrupt("Calibration cancelled by user.")
+        if response == "r":
+            # move to plot origin and reset traveled distance
+            _move_to_plot_origin(controller, plot_origin_bounds)
+            traveled_mm = 0.0
+            _mark_calibration_point(controller)
+            continue
 
         try:
             requested_delta_mm = _parse_axis_calibration_delta(response, step_mm)
         except ValueError:
-            print("Invalid response. Use Enter, h, b, bh, y, q, or a signed millimeter delta.")
+            print("Invalid response. Use Enter, h, b, bh, y, q, r, or a signed millimeter delta.")
             continue
 
         next_extent_mm = min(max(traveled_mm + requested_delta_mm, 0.0), max_extent_mm)
@@ -348,6 +357,7 @@ def _build_calibrated_workspace_bounds(args: argparse.Namespace) -> WorkspaceBou
             axis="x",
             max_extent_mm=max_x_mm,
             step_mm=step_mm,
+            plot_origin_bounds=plot_origin_bounds,
         )
         _prompt_ready(
             "Return the rig to the saved plotting origin before Y calibration, then press Enter to continue or q to quit: "
@@ -357,6 +367,7 @@ def _build_calibrated_workspace_bounds(args: argparse.Namespace) -> WorkspaceBou
             axis="y",
             max_extent_mm=max_y_mm,
             step_mm=step_mm,
+            plot_origin_bounds=plot_origin_bounds,
         )
 
     return WorkspaceBounds(
@@ -643,10 +654,8 @@ def _calibrate_plot_origin_offset(
     candidate_y_mm = initial_y_mm
 
     print(
-        "Plot-origin calibration: place the pen tip over the desired writing origin, then the machine will home and return to that point using the X/Y offset you provide."
-    )
-    _prompt_ready(
-        "Place the pen tip over the desired plotting origin, then press Enter to home the machine or q to quit: "
+        "Plot-origin calibration: enter the distance from machine home to the desired plotting origin."
+        " The machine will move there so you can verify the position."
     )
 
     while True:
@@ -677,21 +686,30 @@ def _build_calibrated_motion_config(
         midpoint = clamp_pen_position(args.midpoint)
         step = max(args.step, 0.05)
 
-        # Step 1-2: Move to midpoint so the user can set the correct pen height.
-        print(f"Moving the pen to Z={midpoint} mm for pen-height setup.")
-        controller.move_pen(midpoint)
+        # Steps 1-2: Move XY to the centre of the safe workspace and Z to 0.5 mm.
+        center_x_mm = seeded_bounds.width_mm / 2.0
+        center_y_mm = seeded_bounds.height_mm / 2.0
+        print(
+            f"Moving XY to the centre of the safe workspace ({center_x_mm:g} mm, {center_y_mm:g} mm)"
+            f" and Z to 5 mm."
+        )
+        controller.move_relative(x_mm=center_x_mm, y_mm=center_y_mm)
+        controller.move_pen(5.0)
+
+        # Step 3: User mounts the pen at 2-4 mm from the bottom (no head movement required).
         _prompt_ready(
-            f"Position the pen so there is 2–4 mm of clearance above the drawing surface at Z={midpoint} mm, then press Enter to continue or q to quit: "
+            "Mount the pen so the tip is at 2-4 mm from the bottom of the carriage,"
+            " then press Enter to home or q to quit: "
         )
 
-        # Step 3: Determine the plot origin.
+        # Step 4: Determine the plot origin programmatically.
         origin_offset_x_mm, origin_offset_y_mm = _calibrate_plot_origin_offset(
             controller,
             initial_x_mm=seeded_bounds.origin_offset_x_mm,
             initial_y_mm=seeded_bounds.origin_offset_y_mm,
         )
 
-        # Step 4: Pen-down / pen-up calibration.
+        # Step 5: Pen-down / pen-up calibration.
         pen_down_position = _probe_pen_down(controller, midpoint=midpoint, step=step)
         pen_up_position = _probe_pen_up(
             controller,

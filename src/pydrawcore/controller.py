@@ -163,6 +163,26 @@ class DrawCoreController:
             response_timeout=self.motion.motion_timeout,
         )
 
+    def move_absolute(
+        self,
+        *,
+        x_mm: float = 0.0,
+        y_mm: float = 0.0,
+        feed_rate: int | None = None,
+    ) -> None:
+        """Move to an absolute plot-space position.
+
+        Coordinates are relative to machine home (0, 0). Positive ``x_mm``
+        moves right; positive ``y_mm`` moves downward in plot space and is
+        converted to the inverted machine Y that DrawCore firmware expects.
+        """
+        if feed_rate is None:
+            feed_rate = self.motion.feed_rate_xy
+        self._transport.command(
+            f"G1G90X{_format_gcode_number(x_mm)}Y{_format_gcode_number(-y_mm)}F{feed_rate}",
+            response_timeout=self.motion.motion_timeout,
+        )
+
     def home(self) -> None:
         """Run the device homing sequence."""
         self._transport.home()
