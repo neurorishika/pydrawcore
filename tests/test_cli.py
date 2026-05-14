@@ -36,7 +36,7 @@ class FakeCalibrationController:
 
 def test_calibrate_pen_writes_motion_profile(monkeypatch, tmp_path, capsys) -> None:
     controller = FakeCalibrationController()
-    answers = iter(["", "12", "7", "y", "", "", "y", "", "y"])
+    answers = iter(["", "", "12", "7", "y", "", "y", "", "y"])
     output_path = tmp_path / "motion.json"
     workspace_path = tmp_path / "workspace.json"
 
@@ -68,6 +68,7 @@ def test_calibrate_pen_writes_motion_profile(monkeypatch, tmp_path, capsys) -> N
         "feed_rate_pen_down": 5000,
         "pen_up_position": 4.5,
         "pen_down_position": 5.5,
+        "motion_timeout": 300.0,
     }
     assert json.loads(workspace_path.read_text(encoding="utf-8")) == {
         "model": "default",
@@ -83,7 +84,7 @@ def test_calibrate_pen_writes_motion_profile(monkeypatch, tmp_path, capsys) -> N
 
 def test_calibrate_pen_uses_safe_limits_when_user_keeps_advancing(monkeypatch, tmp_path, capsys) -> None:
     controller = FakeCalibrationController()
-    answers = iter(["", "0", "0", "y", "", "", "", "", "", "", "", "", "", "", "", "", ""])
+    answers = iter(["", "", "0", "0", "y", "", "", "", "", "", "", "", "", "", "", "", ""])
     config_dir = tmp_path / ".drawcore"
 
     monkeypatch.setattr(cli, "_controller_from_args", lambda args: controller)
@@ -191,7 +192,7 @@ def test_pen_up_uses_default_profile_from_config_dir(monkeypatch, tmp_path) -> N
 
 def test_calibrate_pen_saves_default_profile_in_config_dir(monkeypatch, tmp_path, capsys) -> None:
     controller = FakeCalibrationController()
-    answers = iter(["", "9", "6", "y", "", "", "y", "", "y"])
+    answers = iter(["", "", "9", "6", "y", "", "y", "", "y"])
     config_dir = tmp_path / ".drawcore"
 
     monkeypatch.setattr(cli, "_controller_from_args", lambda args: controller)
@@ -208,6 +209,7 @@ def test_calibrate_pen_saves_default_profile_in_config_dir(monkeypatch, tmp_path
         "feed_rate_pen_down": 5000,
         "pen_up_position": 4.5,
         "pen_down_position": 5.5,
+        "motion_timeout": 300.0,
     }
     saved_workspace = config_dir / "workspace.json"
     assert json.loads(saved_workspace.read_text(encoding="utf-8")) == {

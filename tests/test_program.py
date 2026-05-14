@@ -66,7 +66,9 @@ def test_run_program_uses_calibrated_width_and_blot_dwell() -> None:
     )
 
     assert controller.calls == [
-        ("pen_up", None, None, None),
+        ("pen_up", None, None, None),      # run() start: raise pen
+        # _move_to(0, 0) is a no-op – already at origin
+        ("pen_up", None, None, None),      # MOVE: _move_to raises pen
         ("move_relative", 10.0, 5.0, 1200),
         ("pen_down", None, None, None),
         ("move_relative", 20.0, 0.0, 600),
@@ -74,6 +76,9 @@ def test_run_program_uses_calibrated_width_and_blot_dwell() -> None:
         ("pen_down", None, None, None),
         ("dwell", 100.0, None, None),
         ("pen_up", None, None, None),
+        ("pen_up", None, None, None),      # run() end: raise pen
+        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
+        ("move_relative", -30.0, -5.0, 1200),  # run() end: return to origin
     ]
 
 
@@ -87,6 +92,8 @@ def test_run_program_uses_setwidth_as_default_draw_width() -> None:
     )
 
     assert controller.calls == [
+        ("pen_up", None, None, None),      # run() start: raise pen
+        # _move_to(0, 0) is a no-op – already at origin
         ("pen_down", None, None, None),
         ("move_relative", 20.0, 0.0, 600),
         ("pen_up", None, None, None),
@@ -96,6 +103,9 @@ def test_run_program_uses_setwidth_as_default_draw_width() -> None:
         ("pen_down", None, None, None),
         ("move_relative", -10.0, -0.0, 1200),
         ("pen_up", None, None, None),
+        ("pen_up", None, None, None),      # run() end: raise pen
+        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
+        ("move_relative", -30.0, 0.0, 1200),   # run() end: return to origin
     ]
 
 
@@ -125,13 +135,17 @@ def test_runner_returns_to_plotting_origin_with_pen_up() -> None:
     runner.return_to_origin()
 
     assert controller.calls == [
-        ("pen_up", None, None, None),
+        ("pen_up", None, None, None),      # run() start: raise pen
+        # _move_to(0, 0) is a no-op – already at origin
+        ("pen_up", None, None, None),      # MOVE: _move_to raises pen
         ("move_relative", 10.0, 5.0, 1200),
         ("pen_down", None, None, None),
         ("move_relative", 20.0, 0.0, 600),
         ("pen_up", None, None, None),
-        ("pen_up", None, None, None),
-        ("move_relative", -30.0, -5.0, 1200),
+        ("pen_up", None, None, None),      # run() end: raise pen
+        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
+        ("move_relative", -30.0, -5.0, 1200),  # run() end: return to origin
+        # return_to_origin() called explicitly – already at (0,0) so no-op
     ]
 
 

@@ -211,9 +211,20 @@ class ProgramRunner:
     state: TurtleState = field(default_factory=TurtleState)
 
     def run(self, program: Program) -> None:
-        """Execute each top-level command in order."""
+        """Execute each top-level command in order.
+
+        The pen is raised and the machine is moved to the plotting origin
+        (0, 0) both before the first command and after the last command so
+        that every run starts and ends at a known position.
+        """
+        # Raise pen and go to plotting origin before executing commands
+        self.controller.pen_up()
+        self._move_to(0.0, 0.0)
         for command in program.commands:
             self._execute_command(command)
+        # Raise pen and return to plotting origin after all commands complete
+        self.controller.pen_up()
+        self._move_to(0.0, 0.0)
 
     def return_to_origin(self) -> None:
         """Travel back to the program origin with the pen raised."""
@@ -287,7 +298,7 @@ class ProgramRunner:
         if delta_x_mm == 0.0 and delta_y_mm == 0.0:
             return
         self.controller.pen_up()
-        self.controller.move_relative(x_mm=delta_x_mm, y_mm=delta_y_mm, feed_rate=self.motion.feed_rate_xy)
+        self.controller.move_relative(x_mm=delta_x_mm, y_mm=delta_y_mm, feed_rate=self.motion.feed_rate_travel)
         self.state.x_mm = target_x_mm
         self.state.y_mm = target_y_mm
 

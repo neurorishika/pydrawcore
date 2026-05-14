@@ -692,8 +692,6 @@ def _build_calibrated_motion_config(
         )
 
         # Step 4: Pen-down / pen-up calibration.
-        print("Moving the pen to the safe midpoint for Z calibration.")
-        controller.move_pen(midpoint)
         pen_down_position = _probe_pen_down(controller, midpoint=midpoint, step=step)
         pen_up_position = _probe_pen_up(
             controller,

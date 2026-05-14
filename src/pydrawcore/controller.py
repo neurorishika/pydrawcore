@@ -159,7 +159,8 @@ class DrawCoreController:
         if feed_rate is None:
             feed_rate = self.motion.feed_rate_xy
         self._transport.command(
-            f"G1G91X{_format_gcode_number(x_mm)}Y{_format_gcode_number(-y_mm)}F{feed_rate}"
+            f"G1G91X{_format_gcode_number(x_mm)}Y{_format_gcode_number(-y_mm)}F{feed_rate}",
+            response_timeout=self.motion.motion_timeout,
         )
 
     def home(self) -> None:

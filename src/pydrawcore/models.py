@@ -262,10 +262,12 @@ class MotionConfig:
     """
 
     feed_rate_xy: int = 1200
+    feed_rate_travel: int = 3000
     feed_rate_pen_up: int = 5000
     feed_rate_pen_down: int = 5000
     pen_up_position: float = 0.5
     pen_down_position: float = 5.0
+    motion_timeout: float = 300.0
     line_width_calibration: CalibrationModel | None = None
     blot_delay_calibration: CalibrationModel | None = None
 

@@ -70,10 +70,11 @@ class DrawCoreTransport(BaseTransport):
 
     def command(self, command: str, *, response_timeout: float | None = None) -> None:
         normalized = ensure_cr(command)
-        response = self._round_trip(normalized, response_timeout=response_timeout)
+        deadline = time.monotonic() + response_timeout if response_timeout is not None else None
+        response = self._round_trip(normalized, deadline=deadline)
         # Skip any stale status reports buffered from prior polling (lines starting with '<').
         while response.strip().startswith("<"):
-            response = self._readline(expect_non_empty=True)
+            response = self._readline(expect_non_empty=True, deadline=deadline)
         parse_ok(response, normalized.rstrip())
 
     def query(self, command: str) -> str:
@@ -113,31 +114,25 @@ class DrawCoreTransport(BaseTransport):
         self._serial.readline()
         self._serial.reset_input_buffer()
 
-    def _round_trip(self, command: str, *, response_timeout: float | None = None) -> str:
+    def _round_trip(self, command: str, *, deadline: float | None = None) -> str:
         self._ensure_open()
-        original_timeout = self._serial.timeout
-        if response_timeout is not None:
-            self._serial.timeout = response_timeout
         try:
             self._serial.write(command.encode("ascii"))
         except serial.SerialException as exc:
             raise ConnectionError(f"Failed while sending {command!r}") from exc
-        try:
-            return self._readline(expect_non_empty=True)
-        finally:
-            if response_timeout is not None:
-                self._serial.timeout = original_timeout
+        return self._readline(expect_non_empty=True, deadline=deadline)
 
-    def _readline(self, expect_non_empty: bool) -> str:
+    def _readline(self, expect_non_empty: bool, deadline: float | None = None) -> str:
         self._ensure_open()
-        attempts = 0
-        response = self._serial.readline().decode("ascii", errors="replace")
-        while not response and attempts < 10:
+        # When no deadline is given, fall back to a short default (10 × per-read timeout).
+        effective_deadline = deadline if deadline is not None else time.monotonic() + self._serial.timeout * 10
+        while time.monotonic() < effective_deadline:
             response = self._serial.readline().decode("ascii", errors="replace")
-            attempts += 1
-        if expect_non_empty and not response:
+            if response:
+                return response
+        if expect_non_empty:
             raise ProtocolError("Timed out waiting for device response.")
-        return response
+        return ""
 
     def _get_status(self) -> str:
         return self.query("?")
