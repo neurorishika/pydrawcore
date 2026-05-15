@@ -114,7 +114,7 @@ class DrawCoreController:
                 feed_rate = self.motion.feed_rate_pen_up
             else:
                 feed_rate = self.motion.feed_rate_pen_down
-        self._transport.command(f"G1G90 Z{_format_gcode_number(position)}F{feed_rate}")
+        self._transport.command(f"G1G90 Z{_format_gcode_number(position)}F{feed_rate}", response_timeout=self.motion.motion_timeout)
 
     def move_pen_relative(self, delta: float, *, feed_rate: int | None = None) -> None:
         """Move the pen relative to its current position."""
@@ -125,7 +125,7 @@ class DrawCoreController:
                 feed_rate = self.motion.feed_rate_pen_up
             else:
                 feed_rate = self.motion.feed_rate_pen_down
-        self._transport.command(f"G1G91 Z{_format_gcode_number(delta)}F{feed_rate}")
+        self._transport.command(f"G1G91 Z{_format_gcode_number(delta)}F{feed_rate}", response_timeout=self.motion.motion_timeout)
 
     def pen_up(self) -> None:
         """Raise the pen using the active motion profile."""

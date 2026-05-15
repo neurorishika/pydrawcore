@@ -498,13 +498,83 @@ def _resolve_blot_delay_range(args: argparse.Namespace) -> tuple[float, float]:
     return min_dwell_ms, max_dwell_ms
 
 
+# ---------------------------------------------------------------------------
+# Stroke font for calibration labels (7-segment digits, 4 × 6 unit grid,
+# y increases downward in plot space)
+# ---------------------------------------------------------------------------
+_STROKE_SEGMENTS: dict[str, tuple[float, float, float, float]] = {
+    "a": (0, 0, 4, 0),  # top horizontal
+    "b": (4, 0, 4, 3),  # top-right vertical
+    "c": (4, 3, 4, 6),  # bottom-right vertical
+    "d": (0, 6, 4, 6),  # bottom horizontal
+    "e": (0, 3, 0, 6),  # bottom-left vertical
+    "f": (0, 0, 0, 3),  # top-left vertical
+    "g": (0, 3, 4, 3),  # middle horizontal
+}
+_DIGIT_STROKES: dict[str, list[str]] = {
+    "0": ["a", "b", "c", "d", "e", "f"],
+    "1": ["b", "c"],
+    "2": ["a", "b", "g", "e", "d"],
+    "3": ["a", "b", "g", "c", "d"],
+    "4": ["f", "g", "b", "c"],
+    "5": ["a", "f", "g", "c", "d"],
+    "6": ["a", "f", "g", "e", "c", "d"],
+    "7": ["a", "b", "c"],
+    "8": ["a", "b", "c", "d", "e", "f", "g"],
+    "9": ["a", "b", "c", "d", "f", "g"],
+}
+
+
+def _draw_stroke_label(
+    controller: DrawCoreController,
+    text: str,
+    abs_x_mm: float,
+    abs_y_mm: float,
+    *,
+    char_unit_mm: float = 1.0,
+) -> None:
+    """Render a string of digits, dots, and dashes as 7-segment strokes.
+
+    Each digit occupies a 4 × 6 unit bounding box; one unit = ``char_unit_mm``.
+    ``abs_x_mm`` / ``abs_y_mm`` is the top-left of the first character in
+    absolute machine coordinates (from home).
+    """
+    char_advance_mm = 5 * char_unit_mm  # 4 wide + 1 gap
+    cursor_x = abs_x_mm
+    for ch in text:
+        if ch == ".":
+            controller.move_absolute(x_mm=cursor_x + 2 * char_unit_mm, y_mm=abs_y_mm + 6 * char_unit_mm)
+            controller.pen_down()
+            controller.raw_command("G4 P0.05")
+            controller.pen_up()
+            cursor_x += 2 * char_unit_mm
+        elif ch in _DIGIT_STROKES:
+            for seg in _DIGIT_STROKES[ch]:
+                x1, y1, x2, y2 = _STROKE_SEGMENTS[seg]
+                controller.move_absolute(x_mm=cursor_x + x1 * char_unit_mm, y_mm=abs_y_mm + y1 * char_unit_mm)
+                controller.pen_down()
+                controller.move_absolute(x_mm=cursor_x + x2 * char_unit_mm, y_mm=abs_y_mm + y2 * char_unit_mm)
+                controller.pen_up()
+            cursor_x += char_advance_mm
+        elif ch == "-":
+            x1, y1, x2, y2 = _STROKE_SEGMENTS["g"]
+            controller.move_absolute(x_mm=cursor_x + x1 * char_unit_mm, y_mm=abs_y_mm + y1 * char_unit_mm)
+            controller.pen_down()
+            controller.move_absolute(x_mm=cursor_x + x2 * char_unit_mm, y_mm=abs_y_mm + y2 * char_unit_mm)
+            controller.pen_up()
+            cursor_x += char_advance_mm
+
+
 def _build_line_width_calibration(args: argparse.Namespace, motion: MotionConfig) -> CalibrationModel:
     min_feed_rate, max_feed_rate = _resolve_line_width_range(args, motion)
     feed_rates = _build_sample_values(min_feed_rate, max_feed_rate, args.samples)
-    samples: list[CalibrationSample] = []
     plot_origin_bounds = _require_workspace_profile(args)
-    current_x_mm = args.offset_x_mm
-    current_y_mm = args.offset_y_mm
+    label_gap_mm = 3.0
+    char_unit_mm = 1.0
+
+    # Absolute machine positions for sample rows (measured from home).
+    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + args.offset_x_mm
+    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + args.offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
@@ -513,38 +583,65 @@ def _build_line_width_calibration(args: argparse.Namespace, motion: MotionConfig
         _prompt_ready(
             "Homing complete. Verify the pen is over the saved plotting origin, place clean paper under the pen, then press Enter to start line-width calibration or q to quit: "
         )
-        controller.move_relative(x_mm=current_x_mm, y_mm=current_y_mm)
         print(
-            "Drawing line-width samples from the current plotting origin offset with logarithmic spacing across the chosen feed-rate range. Measure each line thickness in mm after it is drawn."
+            f"Drawing {len(feed_rates)} line-width samples with feed-rate annotations."
+            " Measure all line widths in mm once drawing is complete."
         )
 
         try:
-            for index, feed_rate in enumerate(feed_rates, start=1):
-                print(f"Sample {index}/{len(feed_rates)}: drawing {args.line_length_mm:.2f} mm at feed rate {feed_rate:.2f}.")
+            for index, feed_rate in enumerate(feed_rates):
+                sample_abs_y = origin_abs_y + index * args.line_spacing_mm
+                controller.move_absolute(x_mm=origin_abs_x, y_mm=sample_abs_y)
                 controller.pen_down()
-                controller.move_relative(x_mm=args.line_length_mm, feed_rate=round(feed_rate))
+                controller.move_absolute(x_mm=origin_abs_x + args.line_length_mm, y_mm=sample_abs_y, feed_rate=round(feed_rate))
                 controller.pen_up()
-                measured_value = _prompt_measured_value(
-                    f"Enter measured line width for feed rate {feed_rate:.2f} in mm, or q to quit: "
+                _draw_stroke_label(
+                    controller,
+                    str(round(feed_rate)),
+                    origin_abs_x + args.line_length_mm + label_gap_mm,
+                    sample_abs_y - 3 * char_unit_mm,
+                    char_unit_mm=char_unit_mm,
                 )
-                samples.append(CalibrationSample(parameter_value=feed_rate, measured_value=measured_value))
-                if index < len(feed_rates):
-                    controller.move_relative(x_mm=-args.line_length_mm, y_mm=args.line_spacing_mm)
-                    current_y_mm += args.line_spacing_mm
         finally:
             controller.pen_up()
-            controller.move_relative(x_mm=-current_x_mm, y_mm=-current_y_mm)
+            _move_to_plot_origin(controller, plot_origin_bounds)
 
-    return CalibrationModel.fit(samples)
+        print("All samples drawn. Sample order (top to bottom):")
+        for index, feed_rate in enumerate(feed_rates, start=1):
+            print(f"  [{index}] feed rate = {round(feed_rate)}")
+
+        while True:
+            raw = input(
+                f"Enter {len(feed_rates)} line widths in mm, comma-separated top to bottom (or q to quit): "
+            ).strip()
+            if raw.lower() == "q":
+                raise KeyboardInterrupt("Calibration cancelled by user.")
+            try:
+                values = [float(v.strip()) for v in raw.split(",")]
+            except ValueError:
+                print("Could not parse values. Enter numbers separated by commas.")
+                continue
+            if len(values) != len(feed_rates):
+                print(f"Expected {len(feed_rates)} values, got {len(values)}. Try again.")
+                continue
+            break
+
+    return CalibrationModel.fit([
+        CalibrationSample(parameter_value=fr, measured_value=mv)
+        for fr, mv in zip(feed_rates, values)
+    ])
 
 
 def _build_blot_delay_calibration(args: argparse.Namespace) -> CalibrationModel:
     min_dwell_ms, max_dwell_ms = _resolve_blot_delay_range(args)
     dwell_values_ms = _build_sample_values(min_dwell_ms, max_dwell_ms, args.samples)
-    samples: list[CalibrationSample] = []
     plot_origin_bounds = _require_workspace_profile(args)
-    current_x_mm = args.offset_x_mm
-    current_y_mm = args.offset_y_mm
+    label_gap_mm = 3.0
+    char_unit_mm = 1.0
+
+    # Absolute machine positions for sample rows (measured from home).
+    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + args.offset_x_mm
+    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + args.offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
@@ -553,29 +650,53 @@ def _build_blot_delay_calibration(args: argparse.Namespace) -> CalibrationModel:
         _prompt_ready(
             "Homing complete. Verify the pen is over the saved plotting origin, place clean paper under the pen, then press Enter to start blot-size calibration or q to quit: "
         )
-        controller.move_relative(x_mm=current_x_mm, y_mm=current_y_mm)
         print(
-            "Creating blot samples from the current plotting origin offset with logarithmic spacing across the chosen dwell range. Measure each blot diameter in mm after it is made."
+            f"Creating {len(dwell_values_ms)} blot samples with dwell-time annotations."
+            " Measure all blot diameters in mm once drawing is complete."
         )
 
         try:
-            for index, dwell_ms in enumerate(dwell_values_ms, start=1):
-                print(f"Sample {index}/{len(dwell_values_ms)}: dwelling for {dwell_ms:.0f} ms.")
+            for index, dwell_ms in enumerate(dwell_values_ms):
+                sample_abs_y = origin_abs_y + index * args.spot_spacing_mm
+                controller.move_absolute(x_mm=origin_abs_x, y_mm=sample_abs_y)
                 controller.pen_down()
                 time.sleep(dwell_ms / 1000.0)
                 controller.pen_up()
-                measured_value = _prompt_measured_value(
-                    f"Enter measured blot diameter for dwell {dwell_ms:.0f} ms in mm, or q to quit: "
+                _draw_stroke_label(
+                    controller,
+                    str(round(dwell_ms)),
+                    origin_abs_x + label_gap_mm,
+                    sample_abs_y - 3 * char_unit_mm,
+                    char_unit_mm=char_unit_mm,
                 )
-                samples.append(CalibrationSample(parameter_value=dwell_ms, measured_value=measured_value))
-                if index < len(dwell_values_ms):
-                    controller.move_relative(y_mm=args.spot_spacing_mm)
-                    current_y_mm += args.spot_spacing_mm
         finally:
             controller.pen_up()
-            controller.move_relative(x_mm=-current_x_mm, y_mm=-current_y_mm)
+            _move_to_plot_origin(controller, plot_origin_bounds)
 
-    return CalibrationModel.fit(samples)
+        print("All samples drawn. Sample order (top to bottom):")
+        for index, dwell_ms in enumerate(dwell_values_ms, start=1):
+            print(f"  [{index}] dwell = {round(dwell_ms)} ms")
+
+        while True:
+            raw = input(
+                f"Enter {len(dwell_values_ms)} blot diameters in mm, comma-separated top to bottom (or q to quit): "
+            ).strip()
+            if raw.lower() == "q":
+                raise KeyboardInterrupt("Calibration cancelled by user.")
+            try:
+                values = [float(v.strip()) for v in raw.split(",")]
+            except ValueError:
+                print("Could not parse values. Enter numbers separated by commas.")
+                continue
+            if len(values) != len(dwell_values_ms):
+                print(f"Expected {len(dwell_values_ms)} values, got {len(values)}. Try again.")
+                continue
+            break
+
+    return CalibrationModel.fit([
+        CalibrationSample(parameter_value=dms, measured_value=mv)
+        for dms, mv in zip(dwell_values_ms, values)
+    ])
 
 
 def _probe_pen_down(
