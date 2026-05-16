@@ -13,6 +13,7 @@ from .protocol import ensure_cr, parse_ok, parse_version
 _QUERY_WITHOUT_TRAILING_OK: Final[set[str]] = {"V", "I", "A", "MR", "PI", "QM"}
 _STATUS_QUERY_WITHOUT_TRAILING_OK: Final[set[str]] = {"?"}
 _HOME_RETRYABLE_ERROR_CODES: Final[set[str]] = {"8"}
+_COMMANDS_REQUIRING_IDLE_WAIT: Final[tuple[str, ...]] = ("G0", "G1", "G4")
 
 
 class BaseTransport(ABC):
@@ -26,6 +27,10 @@ class BaseTransport(ABC):
 
     @abstractmethod
     def query(self, command: str) -> str:
+        raise NotImplementedError
+
+    @abstractmethod
+    def wait_until_idle(self, *, timeout: float = 120.0) -> None:
         raise NotImplementedError
 
     @abstractmethod
@@ -107,6 +112,9 @@ class DrawCoreTransport(BaseTransport):
             raise ProtocolError(f"Cannot home while controller status is {current_status!r}.")
         parse_ok(response, normalized.rstrip())
 
+    def wait_until_idle(self, *, timeout: float = 120.0) -> None:
+        self._wait_for_idle(timeout=timeout, action_description="before continuing")
+
     def _wake_device(self) -> None:
         self._ensure_open()
         self._serial.write(b"$B\r")
@@ -146,7 +154,13 @@ class DrawCoreTransport(BaseTransport):
             line = self._readline(expect_non_empty=True)
         raise ProtocolError("Timed out waiting for a controller status response.")
 
-    def _wait_for_idle(self, timeout: float = 120.0, poll_interval: float = 0.2) -> None:
+    def _wait_for_idle(
+        self,
+        timeout: float = 120.0,
+        poll_interval: float = 0.2,
+        *,
+        action_description: str = "after homing",
+    ) -> None:
         last_status = ""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -159,7 +173,7 @@ class DrawCoreTransport(BaseTransport):
                 return
             time.sleep(poll_interval)
         detail = f" Last status was {last_status!r}." if last_status else ""
-        raise ProtocolError(f"Timed out waiting for controller to become idle after homing.{detail}")
+        raise ProtocolError(f"Timed out waiting for controller to become idle {action_description}.{detail}")
 
     def _is_retryable_home_error(self, response: str) -> bool:
         text = response.strip().lower()

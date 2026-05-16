@@ -169,6 +169,27 @@ class PreviewController:
         self.x_mm = next_x_mm
         self.y_mm = next_y_mm
 
+    def move_absolute(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
+        if x_mm == self.x_mm and y_mm == self.y_mm:
+            return
+        operation_kind = "draw" if self.pen_is_down else "travel"
+        estimated_width_mm = None
+        if operation_kind == "draw" and feed_rate is not None and self.motion.line_width_calibration is not None:
+            estimated_width_mm = self.motion.line_width_calibration.predict_measured_value(float(feed_rate))
+        self.operations.append(
+            PreviewOperation(
+                kind=operation_kind,
+                start_x_mm=self.x_mm,
+                start_y_mm=self.y_mm,
+                end_x_mm=x_mm,
+                end_y_mm=y_mm,
+                feed_rate=feed_rate,
+                estimated_width_mm=estimated_width_mm,
+            )
+        )
+        self.x_mm = x_mm
+        self.y_mm = y_mm
+
     def dwell(self, milliseconds: int | float) -> None:
         estimated_blot_size_mm = None
         if self.motion.blot_delay_calibration is not None:
@@ -208,23 +229,45 @@ class ProgramRunner:
     controller: DrawCoreController
     motion: MotionConfig
     circle_segment_length_mm: float = 1.0
+    plot_origin_x_mm: float = 0.0
+    plot_origin_y_mm: float = 0.0
     state: TurtleState = field(default_factory=TurtleState)
 
-    def run(self, program: Program) -> None:
+    def run(
+        self,
+        program: Program,
+        *,
+        move_to_origin_before: bool = True,
+        move_to_origin_after: bool = True,
+    ) -> None:
         """Execute each top-level command in order.
 
-        The pen is raised and the machine is moved to the plotting origin
-        (0, 0) both before the first command and after the last command so
-        that every run starts and ends at a known position.
+        The pen is raised and the machine is commanded to the calibrated
+        plotting origin unconditionally both before the first command and
+        after the last, so every run starts and ends at a verified known
+        position regardless of what the state tracker contains.
         """
-        # Raise pen and go to plotting origin before executing commands
-        self.controller.pen_up()
-        self._move_to(0.0, 0.0)
+        if move_to_origin_before:
+            # Always issue the absolute move — never rely on the state tracker
+            # already being at (0, 0), because the machine may not be.
+            self.controller.pen_up()
+            self._move_machine_absolute(x_mm=0.0, y_mm=0.0, feed_rate=self.motion.feed_rate_travel)
+            self.state.x_mm = 0.0
+            self.state.y_mm = 0.0
         for command in program.commands:
             self._execute_command(command)
-        # Raise pen and return to plotting origin after all commands complete
-        self.controller.pen_up()
-        self._move_to(0.0, 0.0)
+        if move_to_origin_after:
+            self.controller.pen_up()
+            self._move_machine_absolute(x_mm=0.0, y_mm=0.0, feed_rate=self.motion.feed_rate_travel)
+            self.state.x_mm = 0.0
+            self.state.y_mm = 0.0
+
+    def _move_machine_absolute(self, *, x_mm: float, y_mm: float, feed_rate: int) -> None:
+        self.controller.move_absolute(
+            x_mm=self.plot_origin_x_mm + x_mm,
+            y_mm=self.plot_origin_y_mm + y_mm,
+            feed_rate=feed_rate,
+        )
 
     def return_to_origin(self) -> None:
         """Travel back to the program origin with the pen raised."""
@@ -293,12 +336,10 @@ class ProgramRunner:
         raise ProgramError(f"Unsupported command {command.name}", line_number=command.line_number)
 
     def _move_to(self, target_x_mm: float, target_y_mm: float) -> None:
-        delta_x_mm = target_x_mm - self.state.x_mm
-        delta_y_mm = target_y_mm - self.state.y_mm
-        if delta_x_mm == 0.0 and delta_y_mm == 0.0:
+        if target_x_mm == self.state.x_mm and target_y_mm == self.state.y_mm:
             return
         self.controller.pen_up()
-        self.controller.move_relative(x_mm=delta_x_mm, y_mm=delta_y_mm, feed_rate=self.motion.feed_rate_travel)
+        self._move_machine_absolute(x_mm=target_x_mm, y_mm=target_y_mm, feed_rate=self.motion.feed_rate_travel)
         self.state.x_mm = target_x_mm
         self.state.y_mm = target_y_mm
 
@@ -309,14 +350,15 @@ class ProgramRunner:
         line_width_mm: float | None,
         command: ProgramCommand,
     ) -> None:
-        delta_x_mm = target_x_mm - self.state.x_mm
-        delta_y_mm = target_y_mm - self.state.y_mm
-        self._draw_relative(
-            delta_x_mm=delta_x_mm,
-            delta_y_mm=delta_y_mm,
-            line_width_mm=self._effective_line_width(line_width_mm),
-            command=command,
-        )
+        # LINE has an explicit absolute target — use it directly rather than
+        # converting to a delta and back, which would discard the exact
+        # parsed coordinates through floating-point round-trip error.
+        feed_rate = _resolve_line_feed_rate(self.motion, self._effective_line_width(line_width_mm), command)
+        self.controller.pen_down()
+        self._move_machine_absolute(x_mm=target_x_mm, y_mm=target_y_mm, feed_rate=feed_rate)
+        self.controller.pen_up()
+        self.state.x_mm = target_x_mm
+        self.state.y_mm = target_y_mm
 
     def _draw_heading_distance(
         self,
@@ -348,11 +390,13 @@ class ProgramRunner:
         command: ProgramCommand,
     ) -> None:
         feed_rate = _resolve_line_feed_rate(self.motion, line_width_mm, command)
+        target_x_mm = self.state.x_mm + delta_x_mm
+        target_y_mm = self.state.y_mm + delta_y_mm
         self.controller.pen_down()
-        self.controller.move_relative(x_mm=delta_x_mm, y_mm=delta_y_mm, feed_rate=feed_rate)
+        self._move_machine_absolute(x_mm=target_x_mm, y_mm=target_y_mm, feed_rate=feed_rate)
         self.controller.pen_up()
-        self.state.x_mm += delta_x_mm
-        self.state.y_mm += delta_y_mm
+        self.state.x_mm = target_x_mm
+        self.state.y_mm = target_y_mm
 
     def _draw_blot(self, blot_size_mm: float, command: ProgramCommand) -> None:
         dwell_ms = _resolve_blot_dwell(self.motion, blot_size_mm, command)
@@ -377,22 +421,20 @@ class ProgramRunner:
         self._move_to(start_x_mm, start_y_mm)
         feed_rate = _resolve_line_feed_rate(self.motion, effective_line_width_mm, command)
         self.controller.pen_down()
-        current_x_mm = start_x_mm
-        current_y_mm = start_y_mm
+        next_x_mm = start_x_mm
+        next_y_mm = start_y_mm
         for index in range(1, segment_count + 1):
             angle = angle_step * index
             next_x_mm = center_x_mm + (math.cos(angle) * radius_mm)
             next_y_mm = center_y_mm + (math.sin(angle) * radius_mm)
-            self.controller.move_relative(
-                x_mm=next_x_mm - current_x_mm,
-                y_mm=next_y_mm - current_y_mm,
-                feed_rate=feed_rate,
-            )
-            current_x_mm = next_x_mm
-            current_y_mm = next_y_mm
+            self._move_machine_absolute(x_mm=next_x_mm, y_mm=next_y_mm, feed_rate=feed_rate)
         self.controller.pen_up()
-        self.state.x_mm = center_x_mm
-        self.state.y_mm = center_y_mm
+        # Update state to the actual machine position (arc end ≈ arc start),
+        # then travel back to the circle centre so the turtle's logical
+        # position matches the machine position before the next command.
+        self.state.x_mm = next_x_mm
+        self.state.y_mm = next_y_mm
+        self._move_to(center_x_mm, center_y_mm)
 
 
 def parse_program(text: str) -> Program:
@@ -467,6 +509,8 @@ def run_program(
         controller=controller,
         motion=motion,
         circle_segment_length_mm=circle_segment_length_mm,
+        plot_origin_x_mm=(workspace_bounds.origin_offset_x_mm if workspace_bounds is not None else 0.0),
+        plot_origin_y_mm=(workspace_bounds.origin_offset_y_mm if workspace_bounds is not None else 0.0),
         state=TurtleState(heading_deg=_normalize_heading(start_heading_deg)),
     )
     runner.run(program)

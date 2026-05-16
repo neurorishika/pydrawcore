@@ -75,3 +75,27 @@ def test_home_reports_controller_state_when_grbl_rejects_homing() -> None:
         transport.home()
 
     assert serial.writes == [b"?\r", b"$H\r", b"?\r"]
+
+
+def test_motion_command_does_not_poll_for_idle_after_ok() -> None:
+    transport, serial = _make_transport(["ok\r\n"])
+
+    transport.command("G1G90X10.0Y-5.0F3000")
+
+    assert serial.writes == [b"G1G90X10.0Y-5.0F3000\r"]
+
+
+def test_wait_until_idle_polls_until_status_is_idle() -> None:
+    transport, serial = _make_transport(["Run\r\n", "ok\r\n", "<Idle|MPos:0.000,0.000,0.000>\r\n"])
+
+    transport.wait_until_idle(timeout=1.0)
+
+    assert serial.writes == [b"?\r", b"?\r"]
+
+
+def test_non_motion_command_does_not_poll_for_idle() -> None:
+    transport, serial = _make_transport(["ok\r\n"])
+
+    transport.command("$X")
+
+    assert serial.writes == [b"$X\r"]

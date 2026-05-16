@@ -11,6 +11,7 @@ class FakeCalibrationController:
         self.moves: list[tuple[float, float]] = []
         self.raw_commands: list[str] = []
         self.home_called = False
+        self.motion = MotionConfig()
 
     def __enter__(self) -> "FakeCalibrationController":
         return self
@@ -25,6 +26,9 @@ class FakeCalibrationController:
         self.raw_commands.append(command)
 
     def move_relative(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate: int | None = None) -> None:
+        self.moves.append((x_mm, y_mm))
+
+    def move_absolute(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate: int | None = None) -> None:
         self.moves.append((x_mm, y_mm))
 
     def pen_up(self) -> None:
@@ -229,6 +233,7 @@ class FakeBoundsController:
         self.calls: list[tuple[str, float | None, float | None]] = []
         self.port_name = port_name
         self._inferred_model = inferred_model
+        self.motion = MotionConfig()
 
     def __enter__(self) -> "FakeBoundsController":
         return self
@@ -246,6 +251,9 @@ class FakeBoundsController:
         self.calls.append(("pen_down", None, None))
 
     def move_relative(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
+        self.calls.append(("move_relative", x_mm, y_mm))
+
+    def move_absolute(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
         self.calls.append(("move_relative", x_mm, y_mm))
 
     def raw_command(self, command: str) -> None:
@@ -266,6 +274,8 @@ class FakeCommandController:
         self.raw_queries: list[str] = []
         self.dwell_calls: list[float] = []
         self.moves: list[tuple[float, float, int | None]] = []
+        self.motion = MotionConfig()
+        self.wait_until_idle_calls = 0
 
     def __enter__(self) -> "FakeCommandController":
         return self
@@ -295,6 +305,12 @@ class FakeCommandController:
 
     def move_relative(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
         self.moves.append((x_mm, y_mm, feed_rate))
+
+    def move_absolute(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
+        self.moves.append((x_mm, y_mm, feed_rate))
+
+    def wait_until_idle(self, *, timeout: float | None = None) -> None:
+        self.wait_until_idle_calls += 1
 
     def get_device_info(self):
         return DeviceInfo(
@@ -460,21 +476,62 @@ def test_run_program_executes_with_motion_profile(monkeypatch, tmp_path, capsys)
     ).to_file(motion_path)
 
     monkeypatch.setattr(cli, "_controller_from_args", lambda args: controller)
+    monkeypatch.setattr(cli, "_workspace_from_args", lambda args: None)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
 
     exit_code = cli.main(["run-program", str(program_path), "--motion-config", str(motion_path)])
 
     assert exit_code == 0
     assert controller.pen_down_called is True
     assert controller.pen_up_called is True
-    assert controller.home_calls == 0
+    assert controller.home_calls == 2
+    assert controller.wait_until_idle_calls == 3
     assert controller.moves == [
-        (10.0, 5.0, 1200),
-        (20.0, 0.0, 600),
-        (-30.0, -5.0, 1200),
+        (10.0, 5.0, 3000),
+        (30.0, 5.0, 600),
     ]
     assert controller.dwell_calls == [100.0]
     output = json.loads(capsys.readouterr().out)
     assert output["commands"] == 3
+
+
+def test_run_program_executes_relative_to_saved_plot_origin(monkeypatch, tmp_path, capsys) -> None:
+    controller = FakeCommandController()
+    program_path = tmp_path / "pattern.draw"
+    program_path.write_text("MOVE 10 5\nFORWARD 20 WIDTH 0.7\n", encoding="utf-8")
+    motion_path = tmp_path / "motion.json"
+    workspace_path = tmp_path / "workspace.json"
+    MotionConfig(
+        line_width_calibration=CalibrationModel.fit(
+            [
+                CalibrationSample(parameter_value=400.0, measured_value=0.9),
+                CalibrationSample(parameter_value=800.0, measured_value=0.5),
+            ]
+        )
+    ).to_file(motion_path)
+    workspace_path.write_text(
+        json.dumps({"model": "default", "width_mm": 100.0, "height_mm": 100.0, "origin_offset_x_mm": 12.0, "origin_offset_y_mm": 7.0}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(cli, "_controller_from_args", lambda args: controller)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+
+    exit_code = cli.main(
+        ["run-program", str(program_path), "--motion-config", str(motion_path), "--workspace-config", str(workspace_path)]
+    )
+
+    assert exit_code == 0
+    assert controller.home_calls == 2
+    assert controller.wait_until_idle_calls == 3
+    assert controller.moves == [
+        (12.0, 7.0, 3000),
+        (22.0, 12.0, 3000),
+        (42.0, 12.0, 600),
+        (12.0, 7.0, 3000),
+    ]
+    output = json.loads(capsys.readouterr().out)
+    assert output["commands"] == 2
 
 
 def test_run_program_returns_to_origin_when_program_fails(monkeypatch, tmp_path) -> None:
@@ -492,6 +549,7 @@ def test_run_program_returns_to_origin_when_program_fails(monkeypatch, tmp_path)
     ).to_file(motion_path)
 
     monkeypatch.setattr(cli, "_controller_from_args", lambda args: controller)
+    monkeypatch.setattr(cli, "_workspace_from_args", lambda args: None)
 
     try:
         cli.main(["run-program", str(program_path), "--motion-config", str(motion_path)])
@@ -500,7 +558,7 @@ def test_run_program_returns_to_origin_when_program_fails(monkeypatch, tmp_path)
     else:
         raise AssertionError("Expected run-program to fail for out-of-range width")
 
-    assert controller.pen_up_called is True
+    assert controller.pen_up_called is False
     assert controller.home_calls == 0
     assert controller.moves == []
 
@@ -728,25 +786,25 @@ def test_calibrate_xy_saves_workspace_profile(monkeypatch, tmp_path, capsys) -> 
     assert controller.calls == [
         ("home", None, None),
         ("pen_up", None, None),
-        ("move_relative", 12.0, 7.0),
+        ("move_relative", 12.0, 7.0),   # _move_to_plot_origin: move_absolute(12, 7)
         ("pen_up", None, None),
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", 20.0, 0.0),
+        ("move_relative", 32.0, 7.0),   # X step: move_absolute(12+20, 7)
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", -20.0, 0.0),
+        ("move_relative", 12.0, 7.0),   # X return: move_absolute(12, 7)
         ("pen_up", None, None),
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", 0.0, 20.0),
+        ("move_relative", 12.0, 27.0),  # Y step: move_absolute(12, 7+20)
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", 0.0, -20.0),
+        ("move_relative", 12.0, 7.0),   # Y return: move_absolute(12, 7)
     ]
     assert str(saved_profile.resolve()) in capsys.readouterr().out
 
@@ -1002,7 +1060,10 @@ def test_calibrate_xy_supports_reverse_half_step_and_bound_clamping(monkeypatch,
 
     monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
-    measured = cli._measure_axis_extent(controller, axis="x", max_extent_mm=25.0, step_mm=20.0)
+    measured = cli._measure_axis_extent(
+        controller, axis="x", max_extent_mm=25.0, step_mm=20.0,
+        plot_origin_bounds=workspace_bounds_for_model("default"),
+    )
 
     assert measured == 55.0
     assert controller.calls == [
@@ -1010,19 +1071,20 @@ def test_calibrate_xy_supports_reverse_half_step_and_bound_clamping(monkeypatch,
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", 10.0, 0.0),
+        ("move_relative", 10.0, 0.0),   # "h" → move_absolute(0+10, 0)
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", -10.0, 0.0),
+        ("move_relative", 0.0, 0.0),    # "b" clamps to 0 → move_absolute(0, 0)
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", 25.0, 0.0),
+        ("move_relative", 25.0, 0.0),   # "25" → move_absolute(0+25, 0)
         ("pen_down", None, None),
         ("raw_command", None, None),
         ("pen_up", None, None),
-        ("move_relative", -25.0, 0.0),
+        # "" is clamped at max (already 25mm) — no move issued
+        ("move_relative", 0.0, 0.0),    # return: move_absolute(0, 0)
     ]
     output = capsys.readouterr().out
     assert "Reached the configured X maximum at 25.00 mm." in output

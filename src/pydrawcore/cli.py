@@ -192,7 +192,11 @@ def _require_workspace_profile(args: argparse.Namespace) -> WorkspaceBounds:
 def _move_to_plot_origin(controller: DrawCoreController, bounds: WorkspaceBounds) -> None:
     if bounds.origin_offset_x_mm == 0.0 and bounds.origin_offset_y_mm == 0.0:
         return
-    controller.move_absolute(x_mm=bounds.origin_offset_x_mm, y_mm=bounds.origin_offset_y_mm)
+    controller.move_absolute(
+        x_mm=bounds.origin_offset_x_mm,
+        y_mm=bounds.origin_offset_y_mm,
+        feed_rate=getattr(getattr(controller, "motion", None), "feed_rate_travel", None),
+    )
 
 
 def _seed_workspace_bounds_for_controller(
@@ -267,13 +271,15 @@ def _measure_axis_extent(
     step_mm: float,
     plot_origin_bounds: WorkspaceBounds,
 ) -> float:
+    abs_origin_x = plot_origin_bounds.origin_offset_x_mm
+    abs_origin_y = plot_origin_bounds.origin_offset_y_mm
     traveled_mm = 0.0
     controller.pen_up()
     _mark_calibration_point(controller)
     print(
         f"{axis.upper()} calibration: press Enter to move +{step_mm:g} mm, type h for +{step_mm / 2:g} mm, "
         f"b for -{step_mm:g} mm, bh for -{step_mm / 2:g} mm, enter a signed mm delta for a custom move, "
-        "type y when you want to stop and measure, or q to quit. Each stop marks a point with pen-down, then raises before moving again." \
+        "type y when you want to stop and measure, or q to quit. Each stop marks a point with pen-down, then raises before moving again."
         "Press r to reset back to the origin if you want to start over."
     )
 
@@ -285,7 +291,8 @@ def _measure_axis_extent(
         if response == "q":
             raise KeyboardInterrupt("Calibration cancelled by user.")
         if response == "r":
-            # move to plot origin and reset traveled distance
+            # rehome then move to plotting origin via absolute coordinates; reset tracked extent
+            controller.home()
             _move_to_plot_origin(controller, plot_origin_bounds)
             traveled_mm = 0.0
             _mark_calibration_point(controller)
@@ -297,7 +304,9 @@ def _measure_axis_extent(
             print("Invalid response. Use Enter, h, b, bh, y, q, r, or a signed millimeter delta.")
             continue
 
-        next_extent_mm = min(max(traveled_mm + requested_delta_mm, 0.0), max_extent_mm)
+        # Clamp the new extent to [0, max_extent_mm] so the rig can never leave the safe arena.
+        raw_extent_mm = traveled_mm + requested_delta_mm
+        next_extent_mm = min(max(raw_extent_mm, 0.0), max_extent_mm)
         delta_mm = next_extent_mm - traveled_mm
         if delta_mm == 0:
             if requested_delta_mm > 0:
@@ -305,18 +314,24 @@ def _measure_axis_extent(
             elif requested_delta_mm < 0:
                 print(f"Already back at the plotting origin for {axis.upper()} calibration.")
             continue
+        # Warn when the request was partially clamped (move still happens, but shorter than asked).
+        if raw_extent_mm > max_extent_mm:
+            print(f"Warning: requested move would exceed the {axis.upper()} limit ({max_extent_mm:.2f} mm); clamping to limit.")
+        elif raw_extent_mm < 0.0:
+            print(f"Warning: requested move would go past the plotting origin; clamping to origin.")
+        # All moves are expressed as absolute machine coordinates (from home) so that
+        # accumulated floating-point error and missed relative moves can never cause
+        # the head to stray beyond the arena bounds.
         if axis == "x":
-            controller.move_relative(x_mm=delta_mm)
+            controller.move_absolute(x_mm=abs_origin_x + next_extent_mm, y_mm=abs_origin_y)
         else:
-            controller.move_relative(y_mm=delta_mm)
+            controller.move_absolute(x_mm=abs_origin_x, y_mm=abs_origin_y + next_extent_mm)
         traveled_mm = next_extent_mm
         _mark_calibration_point(controller)
 
     measured_mm = float(input(f"Enter the measured physical {axis.upper()} distance in mm: ").strip())
-    if axis == "x":
-        controller.move_relative(x_mm=-traveled_mm)
-    else:
-        controller.move_relative(y_mm=-traveled_mm)
+    # Return to the plotting origin using an absolute move.
+    controller.move_absolute(x_mm=abs_origin_x, y_mm=abs_origin_y)
     return measured_mm
 
 
@@ -390,6 +405,12 @@ def _prompt_ready(message: str) -> None:
     response = input(message).strip().lower()
     if response == "q":
         raise KeyboardInterrupt("Calibration cancelled by user.")
+
+
+def _plot_origin_description(bounds: WorkspaceBounds | None) -> str:
+    if bounds is None:
+        return "the plotting origin at machine home"
+    return "the saved plotting origin"
 
 
 def _prompt_measured_value(message: str) -> float:
@@ -572,9 +593,27 @@ def _build_line_width_calibration(args: argparse.Namespace, motion: MotionConfig
     label_gap_mm = 3.0
     char_unit_mm = 1.0
 
+    # Resolve offsets: use explicit CLI values or auto-compute to avoid blot calibration overlap.
+    blot_cal = motion.blot_delay_calibration
+    if args.offset_x_mm is not None:
+        offset_x_mm = args.offset_x_mm
+    elif blot_cal is not None and blot_cal.grid_origin_x_mm is not None:
+        offset_x_mm = blot_cal.grid_origin_x_mm
+    else:
+        offset_x_mm = 20.0
+
+    if args.offset_y_mm is not None:
+        offset_y_mm = args.offset_y_mm
+    elif blot_cal is not None and blot_cal.grid_origin_y_mm is not None and blot_cal.grid_height_mm is not None:
+        offset_y_mm = blot_cal.grid_origin_y_mm + blot_cal.grid_height_mm + 15.0
+    else:
+        offset_y_mm = 20.0
+
+    grid_height_mm = (len(feed_rates) - 1) * args.line_spacing_mm + 3 * char_unit_mm
+
     # Absolute machine positions for sample rows (measured from home).
-    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + args.offset_x_mm
-    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + args.offset_y_mm
+    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + offset_x_mm
+    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
@@ -629,19 +668,37 @@ def _build_line_width_calibration(args: argparse.Namespace, motion: MotionConfig
     return CalibrationModel.fit([
         CalibrationSample(parameter_value=fr, measured_value=mv)
         for fr, mv in zip(feed_rates, values)
-    ])
+    ], grid_origin_x_mm=offset_x_mm, grid_origin_y_mm=offset_y_mm, grid_height_mm=grid_height_mm)
 
 
-def _build_blot_delay_calibration(args: argparse.Namespace) -> CalibrationModel:
+def _build_blot_delay_calibration(args: argparse.Namespace, motion: MotionConfig) -> CalibrationModel:
     min_dwell_ms, max_dwell_ms = _resolve_blot_delay_range(args)
     dwell_values_ms = _build_sample_values(min_dwell_ms, max_dwell_ms, args.samples)
     plot_origin_bounds = _require_workspace_profile(args)
     label_gap_mm = 3.0
     char_unit_mm = 1.0
 
+    # Resolve offsets: use explicit CLI values or auto-compute to avoid line-width calibration overlap.
+    line_cal = motion.line_width_calibration
+    if args.offset_x_mm is not None:
+        offset_x_mm = args.offset_x_mm
+    elif line_cal is not None and line_cal.grid_origin_x_mm is not None:
+        offset_x_mm = line_cal.grid_origin_x_mm
+    else:
+        offset_x_mm = 20.0
+
+    if args.offset_y_mm is not None:
+        offset_y_mm = args.offset_y_mm
+    elif line_cal is not None and line_cal.grid_origin_y_mm is not None and line_cal.grid_height_mm is not None:
+        offset_y_mm = line_cal.grid_origin_y_mm + line_cal.grid_height_mm + 15.0
+    else:
+        offset_y_mm = 20.0
+
+    grid_height_mm = (len(dwell_values_ms) - 1) * args.spot_spacing_mm + 3 * char_unit_mm
+
     # Absolute machine positions for sample rows (measured from home).
-    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + args.offset_x_mm
-    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + args.offset_y_mm
+    origin_abs_x = plot_origin_bounds.origin_offset_x_mm + offset_x_mm
+    origin_abs_y = plot_origin_bounds.origin_offset_y_mm + offset_y_mm
 
     with _controller_from_args(args) as controller:
         controller.home()
@@ -696,7 +753,7 @@ def _build_blot_delay_calibration(args: argparse.Namespace) -> CalibrationModel:
     return CalibrationModel.fit([
         CalibrationSample(parameter_value=dms, measured_value=mv)
         for dms, mv in zip(dwell_values_ms, values)
-    ])
+    ], grid_origin_x_mm=offset_x_mm, grid_origin_y_mm=offset_y_mm, grid_height_mm=grid_height_mm)
 
 
 def _probe_pen_down(
@@ -1048,14 +1105,14 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_line_width.add_argument(
         "--offset-x-mm",
         type=float,
-        default=20.0,
-        help="Initial X offset from the current plotting origin",
+        default=None,
+        help="Initial X offset from the current plotting origin (default: auto-computed to avoid overlap with blot calibration)",
     )
     calibrate_line_width.add_argument(
         "--offset-y-mm",
         type=float,
-        default=20.0,
-        help="Initial Y offset from the current plotting origin",
+        default=None,
+        help="Initial Y offset from the current plotting origin (default: auto-computed to avoid overlap with blot calibration)",
     )
     calibrate_line_width.add_argument(
         "--output",
@@ -1093,14 +1150,14 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_blot_size.add_argument(
         "--offset-x-mm",
         type=float,
-        default=20.0,
-        help="Initial X offset from the current plotting origin",
+        default=None,
+        help="Initial X offset from the current plotting origin (default: auto-computed to avoid overlap with line-width calibration)",
     )
     calibrate_blot_size.add_argument(
         "--offset-y-mm",
         type=float,
-        default=20.0,
-        help="Initial Y offset from the current plotting origin",
+        default=None,
+        help="Initial Y offset from the current plotting origin (default: auto-computed to avoid overlap with line-width calibration)",
     )
     calibrate_blot_size.add_argument(
         "--output",
@@ -1278,7 +1335,7 @@ def _cmd_calibrate_line_width(args: argparse.Namespace) -> int:
 
 def _cmd_calibrate_blot_size(args: argparse.Namespace) -> int:
     motion = _motion_from_args(args) or MotionConfig()
-    calibrated_blot_size = _build_blot_delay_calibration(args)
+    calibrated_blot_size = _build_blot_delay_calibration(args, motion)
     calibrated_motion = _motion_with_calibration(motion, blot_delay_calibration=calibrated_blot_size)
     print(json.dumps(asdict(calibrated_motion), indent=2))
     output_path = _save_motion_profile(args, calibrated_motion)
@@ -1315,28 +1372,56 @@ def _cmd_run_program(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2))
         return 0
 
+    workspace_bounds = _workspace_from_args(args)
+    if workspace_bounds is not None:
+        check_program_fits_workspace(
+            motion,
+            program_text,
+            workspace_bounds,
+            start_heading_deg=args.start_heading,
+            circle_segment_length_mm=args.circle_segment_length_mm,
+        )
+    else:
+        preview_program(
+            motion,
+            program_text,
+            start_heading_deg=args.start_heading,
+            circle_segment_length_mm=args.circle_segment_length_mm,
+        )
+
     with _controller_from_args(args) as controller:
-        workspace_bounds = _workspace_from_args(args)
-        if workspace_bounds is not None:
-            check_program_fits_workspace(
-                motion,
-                program_text,
-                workspace_bounds,
-                start_heading_deg=args.start_heading,
-                circle_segment_length_mm=args.circle_segment_length_mm,
-            )
         runner = ProgramRunner(
             controller=controller,
             motion=motion,
             circle_segment_length_mm=args.circle_segment_length_mm,
+            plot_origin_x_mm=(workspace_bounds.origin_offset_x_mm if workspace_bounds is not None else 0.0),
+            plot_origin_y_mm=(workspace_bounds.origin_offset_y_mm if workspace_bounds is not None else 0.0),
             state=TurtleState(heading_deg=args.start_heading % 360.0),
         )
+        plot_origin_description = _plot_origin_description(workspace_bounds)
+        controller.home()
         controller.pen_up()
+        if workspace_bounds is not None:
+            _move_to_plot_origin(controller, workspace_bounds)
+        controller.wait_until_idle()
+        _prompt_ready(
+            f"Homing complete. Verify the pen is over {plot_origin_description}, then press Enter to start drawing or q to quit: "
+        )
+        completed = False
         try:
-            runner.run(program)
+            runner.run(program, move_to_origin_before=False, move_to_origin_after=False)
+            completed = True
         finally:
+            controller.wait_until_idle()
+            controller.home()
             controller.pen_up()
-            runner.return_to_origin()
+            if workspace_bounds is not None:
+                _move_to_plot_origin(controller, workspace_bounds)
+            controller.wait_until_idle()
+            status = "Drawing complete" if completed else "Drawing stopped"
+            _prompt_ready(
+                f"{status}. Verify the pen is over {plot_origin_description}, then press Enter to finish or q to quit: "
+            )
     print(json.dumps({"program": str(program_path), "commands": len(program.commands)}, indent=2))
     return 0
 

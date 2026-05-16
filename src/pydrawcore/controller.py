@@ -89,6 +89,10 @@ class DrawCoreController:
         result = self._transport.query("?").strip()
         return result or None
 
+    def wait_until_idle(self, *, timeout: float | None = None) -> None:
+        """Block until the controller reports Idle."""
+        self._transport.wait_until_idle(timeout=self.motion.motion_timeout if timeout is None else timeout)
+
     def get_inferred_model(self) -> str | None:
         return infer_model_from_nickname(self.get_nickname())
 

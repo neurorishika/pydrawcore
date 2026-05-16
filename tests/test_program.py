@@ -18,6 +18,9 @@ class FakeProgramController:
     def move_relative(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
         self.calls.append(("move_relative", x_mm, y_mm, feed_rate))
 
+    def move_absolute(self, *, x_mm: float = 0.0, y_mm: float = 0.0, feed_rate=None) -> None:
+        self.calls.append(("move_absolute", x_mm, y_mm, feed_rate))
+
     def dwell(self, milliseconds: int | float) -> None:
         self.calls.append(("dwell", float(milliseconds), None, None))
 
@@ -67,18 +70,17 @@ def test_run_program_uses_calibrated_width_and_blot_dwell() -> None:
 
     assert controller.calls == [
         ("pen_up", None, None, None),      # run() start: raise pen
-        # _move_to(0, 0) is a no-op – already at origin
+        ("move_absolute", 0.0, 0.0, 3000),
         ("pen_up", None, None, None),      # MOVE: _move_to raises pen
-        ("move_relative", 10.0, 5.0, 1200),
+        ("move_absolute", 10.0, 5.0, 3000),
         ("pen_down", None, None, None),
-        ("move_relative", 20.0, 0.0, 600),
+        ("move_absolute", 30.0, 5.0, 600),
         ("pen_up", None, None, None),
         ("pen_down", None, None, None),
         ("dwell", 100.0, None, None),
         ("pen_up", None, None, None),
         ("pen_up", None, None, None),      # run() end: raise pen
-        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
-        ("move_relative", -30.0, -5.0, 1200),  # run() end: return to origin
+        ("move_absolute", 0.0, 0.0, 3000),
     ]
 
 
@@ -93,19 +95,18 @@ def test_run_program_uses_setwidth_as_default_draw_width() -> None:
 
     assert controller.calls == [
         ("pen_up", None, None, None),      # run() start: raise pen
-        # _move_to(0, 0) is a no-op – already at origin
+        ("move_absolute", 0.0, 0.0, 3000),
         ("pen_down", None, None, None),
-        ("move_relative", 20.0, 0.0, 600),
+        ("move_absolute", 20.0, 0.0, 600),
         ("pen_up", None, None, None),
         ("pen_down", None, None, None),
-        ("move_relative", 20.0, 0.0, 600),
+        ("move_absolute", 40.0, 0.0, 600),
         ("pen_up", None, None, None),
         ("pen_down", None, None, None),
-        ("move_relative", -10.0, -0.0, 1200),
+        ("move_absolute", 30.0, 0.0, 1200),
         ("pen_up", None, None, None),
         ("pen_up", None, None, None),      # run() end: raise pen
-        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
-        ("move_relative", -30.0, 0.0, 1200),   # run() end: return to origin
+        ("move_absolute", 0.0, 0.0, 3000),
     ]
 
 
@@ -136,16 +137,44 @@ def test_runner_returns_to_plotting_origin_with_pen_up() -> None:
 
     assert controller.calls == [
         ("pen_up", None, None, None),      # run() start: raise pen
-        # _move_to(0, 0) is a no-op – already at origin
+        ("move_absolute", 0.0, 0.0, 3000),
         ("pen_up", None, None, None),      # MOVE: _move_to raises pen
-        ("move_relative", 10.0, 5.0, 1200),
+        ("move_absolute", 10.0, 5.0, 3000),
         ("pen_down", None, None, None),
-        ("move_relative", 20.0, 0.0, 600),
+        ("move_absolute", 30.0, 5.0, 600),
         ("pen_up", None, None, None),
         ("pen_up", None, None, None),      # run() end: raise pen
-        ("pen_up", None, None, None),      # run() end: _move_to(0,0) raises pen
-        ("move_relative", -30.0, -5.0, 1200),  # run() end: return to origin
+        ("move_absolute", 0.0, 0.0, 3000),
         # return_to_origin() called explicitly – already at (0,0) so no-op
+    ]
+
+
+def test_run_program_applies_workspace_origin_offset_to_machine_moves() -> None:
+    controller = FakeProgramController()
+
+    run_program(
+        controller,
+        _motion_with_calibration(),
+        "MOVE 10 5\nFORWARD 20 WIDTH 0.7\n",
+        workspace_bounds=WorkspaceBounds(
+            model="test",
+            width_mm=100.0,
+            height_mm=100.0,
+            origin_offset_x_mm=12.0,
+            origin_offset_y_mm=7.0,
+        ),
+    )
+
+    assert controller.calls == [
+        ("pen_up", None, None, None),
+        ("move_absolute", 12.0, 7.0, 3000),
+        ("pen_up", None, None, None),
+        ("move_absolute", 22.0, 12.0, 3000),
+        ("pen_down", None, None, None),
+        ("move_absolute", 42.0, 12.0, 600),
+        ("pen_up", None, None, None),
+        ("pen_up", None, None, None),
+        ("move_absolute", 12.0, 7.0, 3000),
     ]
 
 
@@ -289,7 +318,7 @@ def test_run_program_with_workspace_bounds_executes_when_inside() -> None:
         workspace_bounds=_small_workspace(),
     )
 
-    assert any(call[0] == "move_relative" for call in controller.calls)
+    assert any(call[0] == "move_absolute" for call in controller.calls)
 
 
 def test_check_program_fits_workspace_circle_exceeds_bounds() -> None:

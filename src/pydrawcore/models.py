@@ -68,6 +68,11 @@ class CalibrationModel:
     parameter_max: float | None = None
     measured_min: float | None = None
     measured_max: float | None = None
+    # Physical drawing bounds stored relative to the plot origin (mm).
+    # Set after calibration is drawn so sibling calibrations can avoid overlap.
+    grid_origin_x_mm: float | None = None
+    grid_origin_y_mm: float | None = None
+    grid_height_mm: float | None = None
 
     def __post_init__(self) -> None:
         self.samples = [
@@ -101,12 +106,19 @@ class CalibrationModel:
             parameter_max=float(data["parameter_max"]) if data.get("parameter_max") is not None else None,
             measured_min=float(data["measured_min"]) if data.get("measured_min") is not None else None,
             measured_max=float(data["measured_max"]) if data.get("measured_max") is not None else None,
+            grid_origin_x_mm=float(data["grid_origin_x_mm"]) if data.get("grid_origin_x_mm") is not None else None,
+            grid_origin_y_mm=float(data["grid_origin_y_mm"]) if data.get("grid_origin_y_mm") is not None else None,
+            grid_height_mm=float(data["grid_height_mm"]) if data.get("grid_height_mm") is not None else None,
         )
 
     @classmethod
     def fit(
         cls,
         samples: list[CalibrationSample],
+        *,
+        grid_origin_x_mm: float | None = None,
+        grid_origin_y_mm: float | None = None,
+        grid_height_mm: float | None = None,
     ) -> "CalibrationModel":
         if len(samples) < 2:
             raise ValueError("At least two calibration samples are required.")
@@ -118,6 +130,9 @@ class CalibrationModel:
         return cls(
             samples=normalized_samples,
             fit_kind="piecewise",
+            grid_origin_x_mm=grid_origin_x_mm,
+            grid_origin_y_mm=grid_origin_y_mm,
+            grid_height_mm=grid_height_mm,
         )
 
     def predict_measured_value(self, parameter_value: float) -> float:
@@ -152,7 +167,7 @@ class CalibrationModel:
         for lower, upper in zip(sorted_samples, sorted_samples[1:], strict=True):
             lower_value = lower.measured_value
             upper_value = upper.measured_value
-            if lower_value <= clamped_measured <= upper_value or upper_value <= clamped_measured <= lower_value:
+            if lower_value <= clamped_measured <= upper_value:
                 return _linear_interpolate(
                     lower.measured_value,
                     lower.parameter_value,
@@ -222,7 +237,7 @@ NICKNAME_MODEL_ALIASES: dict[str, str] = {
 
 
 DRAWCORE_WORKSPACE_PRESETS: dict[str, WorkspaceBounds] = {
-    "default": WorkspaceBounds("default", 8.27 * MM_PER_INCH, 11.81 * MM_PER_INCH),
+    "default": WorkspaceBounds("default", 7.10 * MM_PER_INCH, 10.24 * MM_PER_INCH),
     "v3a3": WorkspaceBounds("v3a3", 11.69 * MM_PER_INCH, 16.93 * MM_PER_INCH),
     "v3xlx": WorkspaceBounds("v3xlx", 8.58 * MM_PER_INCH, 23.42 * MM_PER_INCH),
     "minikit": WorkspaceBounds("minikit", 4.00 * MM_PER_INCH, 6.30 * MM_PER_INCH),
