@@ -253,13 +253,28 @@ def _mark_workspace_bounds(args: argparse.Namespace, bounds: WorkspaceBounds) ->
         controller.pen_up()
         if not args.skip_home:
             _move_to_plot_origin(controller, plot_origin)
-        if inset_mm:
-            controller.move_relative(x_mm=inset_mm, y_mm=inset_mm)
-        controller.pen_down()
-        controller.move_relative(x_mm=drawable_width_mm)
-        controller.move_relative(y_mm=drawable_height_mm)
-        controller.move_relative(x_mm=-drawable_width_mm)
-        controller.move_relative(y_mm=-drawable_height_mm)
+            # Position is now known in absolute machine coordinates.  Use absolute
+            # moves for the entire rectangle so the head can never stray beyond
+            # the arena bounds regardless of accumulated error.
+            ox = plot_origin.origin_offset_x_mm + inset_mm
+            oy = plot_origin.origin_offset_y_mm + inset_mm
+            if inset_mm:
+                controller.move_absolute(x_mm=ox, y_mm=oy)
+            controller.pen_down()
+            controller.move_absolute(x_mm=ox + drawable_width_mm, y_mm=oy)
+            controller.move_absolute(x_mm=ox + drawable_width_mm, y_mm=oy + drawable_height_mm)
+            controller.move_absolute(x_mm=ox, y_mm=oy + drawable_height_mm)
+            controller.move_absolute(x_mm=ox, y_mm=oy)
+        else:
+            # Position is unknown (manually placed); use relative moves to draw
+            # a rectangle of the correct size around the current head position.
+            if inset_mm:
+                controller.move_relative(x_mm=inset_mm, y_mm=inset_mm)
+            controller.pen_down()
+            controller.move_relative(x_mm=drawable_width_mm)
+            controller.move_relative(y_mm=drawable_height_mm)
+            controller.move_relative(x_mm=-drawable_width_mm)
+            controller.move_relative(y_mm=-drawable_height_mm)
         controller.pen_up()
 
 
@@ -844,7 +859,9 @@ def _calibrate_plot_origin_offset(
             default_x=candidate_x_mm,
             default_y=candidate_y_mm,
         )
-        controller.move_relative(x_mm=candidate_x_mm, y_mm=candidate_y_mm)
+        # Machine is at home (0, 0); use absolute coordinates so the move is
+        # always bounded by the explicit candidate values entered by the user.
+        controller.move_absolute(x_mm=candidate_x_mm, y_mm=candidate_y_mm)
         response = input(
             f"Accept plotting-origin offset X={candidate_x_mm:g} mm, Y={candidate_y_mm:g} mm? [y/r/q] "
         ).strip().lower()
@@ -852,7 +869,8 @@ def _calibrate_plot_origin_offset(
             return candidate_x_mm, candidate_y_mm
         if response == "q":
             raise KeyboardInterrupt("Calibration cancelled by user.")
-        controller.move_relative(x_mm=-candidate_x_mm, y_mm=-candidate_y_mm)
+        # Return to machine home before the next iteration's home() call.
+        controller.move_absolute(x_mm=0.0, y_mm=0.0)
 
 
 def _build_calibrated_motion_config(
@@ -864,14 +882,16 @@ def _build_calibrated_motion_config(
         midpoint = clamp_pen_position(args.midpoint)
         step = max(args.step, 0.05)
 
-        # Steps 1-2: Move XY to the centre of the safe workspace and Z to 0.5 mm.
+        # Steps 1-2: Home first so position is known, then move to the centre of
+        # the safe workspace using an absolute command.  Z to 5 mm for pen mounting.
         center_x_mm = seeded_bounds.width_mm / 2.0
         center_y_mm = seeded_bounds.height_mm / 2.0
         print(
             f"Moving XY to the centre of the safe workspace ({center_x_mm:g} mm, {center_y_mm:g} mm)"
             f" and Z to 5 mm."
         )
-        controller.move_relative(x_mm=center_x_mm, y_mm=center_y_mm)
+        controller.home()
+        controller.move_absolute(x_mm=center_x_mm, y_mm=center_y_mm)
         controller.move_pen(5.0)
 
         # Step 3: User mounts the pen at 2-4 mm from the bottom (no head movement required).

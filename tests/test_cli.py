@@ -693,13 +693,13 @@ def test_mark_bounds_uses_saved_workspace_profile_by_default(monkeypatch, tmp_pa
     assert controller.calls == [
         ("home", None, None),
         ("pen_up", None, None),
-        ("move_relative", 12.0, 7.0),
-        ("move_relative", 10.0, 10.0),
+        ("move_relative", 12.0, 7.0),    # _move_to_plot_origin: move_absolute(12, 7)
+        ("move_relative", 22.0, 17.0),   # move_absolute(12+10, 7+10)  — inset corner
         ("pen_down", None, None),
-        ("move_relative", 100.0, 0.0),
-        ("move_relative", 0.0, 70.0),
-        ("move_relative", -100.0, 0.0),
-        ("move_relative", 0.0, -70.0),
+        ("move_relative", 122.0, 17.0),  # move_absolute(22+100, 17)   — right
+        ("move_relative", 122.0, 87.0),  # move_absolute(122, 17+70)   — down
+        ("move_relative", 22.0, 87.0),   # move_absolute(22, 87)       — left
+        ("move_relative", 22.0, 17.0),   # move_absolute(22, 17)       — back
         ("pen_up", None, None),
     ]
 
@@ -740,13 +740,13 @@ def test_mark_bounds_explicit_model_overrides_saved_workspace_profile(monkeypatc
     assert controller.calls == [
         ("home", None, None),
         ("pen_up", None, None),
-        ("move_relative", 4.0, 6.0),
-        ("move_relative", 10.0, 10.0),
+        ("move_relative", 4.0, 6.0),                                           # _move_to_plot_origin
+        ("move_relative", 14.0, 16.0),                                         # move_absolute(4+10, 6+10) — inset corner
         ("pen_down", None, None),
-        ("move_relative", bounds.width_mm - 20.0, 0.0),
-        ("move_relative", 0.0, bounds.height_mm - 20.0),
-        ("move_relative", -(bounds.width_mm - 20.0), 0.0),
-        ("move_relative", 0.0, -(bounds.height_mm - 20.0)),
+        ("move_relative", 4.0 + bounds.width_mm - 10.0, 16.0),                # right
+        ("move_relative", 4.0 + bounds.width_mm - 10.0, 6.0 + bounds.height_mm - 10.0),  # down
+        ("move_relative", 14.0, 6.0 + bounds.height_mm - 10.0),               # left
+        ("move_relative", 14.0, 16.0),                                         # back
         ("pen_up", None, None),
     ]
 
